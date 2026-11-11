@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "node node_modules/vite/bin/vite.js",
     "build": "node node_modules/typescript/bin/tsc -b && node node_modules/vite/bin/vite.js build",
+    "test": "node --experimental-strip-types --test tests/md.test.mjs",
     "tauri": "node node_modules/@tauri-apps/cli/tauri.js"
   },
   "dependencies": {
@@ -23,6 +24,7 @@
     "@types/react": "18.3.12",
     "@types/react-dom": "18.3.1",
     "@vitejs/plugin-react": "4.3.4",
+    "jsdom": "^26.1.0",
     "typescript": "5.6.3",
     "vite": "5.4.11"
   }

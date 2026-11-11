@@ -5,7 +5,7 @@ import { Icon } from '../icons'
 import { useApp } from '../store'
 import { api, errText, FOCUS_CATS, type Account } from '../lib/api'
 import { ACCOUNT_COLORS, ago } from '../lib/format'
-import { Seg, Switch } from '../ui'
+import { MdView, Seg, Switch } from '../ui'
 import { GuideContent } from './Guide'
 import { DATA_DIR, IS_MAC, TRAY, VAULT, keyText } from '../lib/platform'
 import { L, catLabel } from '../lib/i18n'
@@ -141,6 +141,7 @@ function AccountCard({ a }: { a: Account }) {
   const [label, setLabel] = useState(a.label)
   const [name, setName] = useState(a.displayName)
   const [sig, setSig] = useState(a.signature)
+  const [sigMode, setSigMode] = useState<'edit' | 'preview'>('edit')
   // 常用分类：本地先变（连点几个不会互相覆盖），保存后以后端为准
   const [focus, setFocus] = useState(a.focus)
   useEffect(() => setFocus(a.focus), [a.focus.join('|')])
@@ -161,8 +162,14 @@ function AccountCard({ a }: { a: Account }) {
           </div>
         </div>
         <div style={{ padding: '10px 14px 12px', borderTop: '.5px solid var(--line-2)' }}>
-          <div className="lbl" style={{ marginBottom: 6 }}>{L('签名', 'Signature')}</div>
-          <textarea className="field" rows={3} style={{ height: 'auto', padding: '8px 12px', resize: 'vertical', lineHeight: 1.5 }} value={sig} onChange={(e) => setSig(e.target.value)} onBlur={() => sig !== a.signature && save({ signature: sig })} placeholder={L('写新邮件时自动加在末尾', 'Added to the end of new emails')} />
+          <div className="row" style={{ marginBottom: 6, gap: 10 }}>
+            <span className="lbl" style={{ flex: 'none' }}>{L('签名', 'Signature')}</span>
+            <span className="row" style={{ gap: 5, fontSize: 12, color: 'var(--sec)' }}><Icon name="markdown" size={16} />{L('支持 Markdown,HTML', 'Supports Markdown,HTML')}</span>
+            <div style={{ marginLeft: 'auto', flex: 'none' }}><Seg small value={sigMode} onChange={setSigMode} options={[['edit', L('编辑', 'Edit')], ['preview', L('预览', 'Preview')]]} /></div>
+          </div>
+          {/* 预览时输入框只是藏起来：切回编辑，拖过的高度和撤销记录都还在 */}
+          <textarea className="field" rows={3} style={{ height: 'auto', padding: '8px 12px', resize: 'vertical', lineHeight: 1.5, display: sigMode === 'edit' ? undefined : 'none' }} value={sig} onChange={(e) => setSig(e.target.value)} onBlur={() => sig !== a.signature && save({ signature: sig })} placeholder={L('写新邮件时自动加在末尾', 'Added to the end of new emails')} aria-label={L('签名', 'Signature')} />
+          {sigMode === 'preview' && <MdView className="sig-preview" md={sig} />}
         </div>
         <div className="gr" style={{ alignItems: 'flex-start', paddingTop: 10, paddingBottom: 10 }}>
           <div style={{ flex: '1 1 auto', minWidth: 0 }}><div className="lbl">{L('常用分类', 'Category tabs')}</div><div className="sub">{L('邮件列表上方的筛选页签。分类由 AI 判断；没配 AI 时只能自动认出「通知」「订阅」', 'Filter tabs above the mail list. Categories come from AI; without AI only Notifications and Newsletters are detected')}</div></div>

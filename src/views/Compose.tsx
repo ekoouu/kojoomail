@@ -6,8 +6,8 @@ import { Icon } from '../icons'
 import { useApp, pendingSends } from '../store'
 import { api, errText, type Addr, type DraftIn } from '../lib/api'
 import { parseAddrs, validEmail, fullTime } from '../lib/format'
-import { mdPreview, mdToHtml, quoteText } from '../lib/md'
-import { Seg, Sheet, useMenu } from '../ui'
+import { mdToHtml, quoteText, withSignature } from '../lib/md'
+import { MdView, Seg, Sheet, useMenu } from '../ui'
 import { keyText } from '../lib/platform'
 import { L, EN } from '../lib/i18n'
 
@@ -41,12 +41,15 @@ export default function Compose() {
     if (c.prefill?.subject != null) subject = c.prefill.subject
     const d = c.draft
     if (d) {
-      // 草稿里存的正文已经带着引用，原样恢复
-      return { accountId: d.accountId || accountId, to: d.to, cc: d.cc, bcc: d.bcc, subject: d.subject, body: d.body, quote: '', files: d.attachments || [], replyMsg: d.replyMsg ?? null, mode: d.mode || 'new' }
+      // 草稿里存的正文已经带着引用，原样恢复；签名现在单独显示，草稿末尾带的那份去掉（新旧两种拼法都认）
+      const sig = me(d.accountId || accountId)?.signature || ''
+      let body = d.body
+      for (const tail of [`\n\n-- \n${sig}`, `\n\n${sig}`]) {
+        if (sig && body.endsWith(tail)) { body = body.slice(0, -tail.length); break }
+      }
+      return { accountId: d.accountId || accountId, to: d.to, cc: d.cc, bcc: d.bcc, subject: d.subject, body, quote: '', files: d.attachments || [], replyMsg: d.replyMsg ?? null, mode: d.mode || 'new' }
     }
-    const sig = accountId ? me(accountId)?.signature : ''
-    const body = (c.prefill?.body ?? '') + (sig && !c.prefill?.body ? `\n\n${sig}` : '')
-    return { accountId, to, cc, bcc: [] as Addr[], subject, body, quote, files: [] as string[], replyMsg: base?.id ?? null, mode: c.mode === 'draft' ? 'new' : c.mode }
+    return { accountId, to, cc, bcc: [] as Addr[], subject, body: c.prefill?.body ?? '', quote, files: [] as string[], replyMsg: base?.id ?? null, mode: c.mode === 'draft' ? 'new' : c.mode }
   }, [c.key])
 
   const [accountId, setAccountId] = useState<number>(initial.accountId!)
@@ -68,9 +71,13 @@ export default function Compose() {
   const bodyRef = useRef<HTMLTextAreaElement>(null)
   const menu = useMenu()
 
+  const sig = me(accountId)?.signature || ''
+  // 签名不进编辑框：正文下面单独排好版显示，发送、预览和存草稿时拼在末尾（带正文/签名分隔）
+  const { text: withSig, md: withSigMd } = withSignature(body, sig)
+
   const draft = (): DraftIn => ({
     id: draftId, accountId, to: rc.to, cc: rc.cc, bcc: rc.bcc, subject,
-    body: body + (initial.quote ? initial.quote : ''), html: '', replyMsg: initial.replyMsg, mode: initial.mode, attachments: files,
+    body: withSig + (initial.quote ? initial.quote : ''), html: '', replyMsg: initial.replyMsg, mode: initial.mode, attachments: files,
   })
 
   // 自动存草稿：停止输入 2 秒后
@@ -133,7 +140,8 @@ export default function Compose() {
     s.refreshMeta()
   }
 
-  const placeholders = (body.match(/\[[^\]\n]{1,30}\]/g) || []).filter((p) => !/^\[[xX ]\]$/.test(p))
+  // 没填的占位：[日期] 这种。Markdown 的链接、图片 [文字](网址) 不算（签名里常有）；链接按钮插的 (https://) 还没填网址，照样提醒
+  const placeholders = (withSig.match(/\[[^\]\n]{1,30}\](?!\((?:https?:\/\/|mailto:|tel:)[^\s)])/gi) || []).filter((p) => !/^\[[xX ]\]$/.test(p))
   const facts = base?.ai?.facts || []
 
   const send = async () => {
@@ -150,7 +158,7 @@ export default function Compose() {
     if (!subject.trim() && !await ask(L('没有主题，确定发送吗？', 'No subject. Send anyway?'))) return
     const d = draft()
     try { await api.precheckSend(d) } catch (e) { s.toast(errText(e), { kind: 'err', ttl: 8000 }); return }
-    d.html = mdToHtml(d.body)
+    d.html = mdToHtml(withSigMd + (initial.quote ? initial.quote : ''))
     // 先存草稿：发送失败或撤销时内容不会丢
     try { d.id = await api.saveDraft({ ...d, html: '' }) } catch { /* */ }
     s.set({ compose: null })
@@ -226,16 +234,7 @@ export default function Compose() {
         <div className="c-edit" style={{ position: 'relative' }}>
           <div className="c-field">
             <span className="k">{L('发件人', 'From')}</span>
-            <select value={accountId} onChange={(e) => {
-              const next = Number(e.target.value)
-              const oldSig = me(accountId)?.signature || ''
-              const newSig = me(next)?.signature || ''
-              if (oldSig !== newSig) {
-                if (oldSig && body.endsWith(`\n\n${oldSig}`)) setBody(body.slice(0, -oldSig.length - 2) + (newSig ? `\n\n${newSig}` : ''))
-                else if (!oldSig && newSig && !body.includes(newSig)) setBody(`${body}\n\n${newSig}`)
-              }
-              setAccountId(next); touch()
-            }} className="field" style={{ width: 'auto', height: 28, fontSize: 13, padding: '0 8px', maxWidth: '100%' }} aria-label={L('发件账号', 'Sending account')}>
+            <select value={accountId} onChange={(e) => { setAccountId(Number(e.target.value)); touch() }} className="field" style={{ width: 'auto', height: 28, fontSize: 13, padding: '0 8px', maxWidth: '100%' }} aria-label={L('发件账号', 'Sending account')}>
               {s.accounts.map((a) => <option key={a.id} value={a.id}>{(a.label ? `${a.label} · ` : '') + a.email}</option>)}
             </select>
           </div>
@@ -255,9 +254,17 @@ export default function Compose() {
             )}
           </div>
           {mode === 'edit' ? (
-            <textarea ref={bodyRef} value={body} onChange={(e) => { setBody(e.target.value); touch() }} placeholder={L('写点什么…', 'Write something…')} aria-label={L('正文', 'Message body')} spellCheck={false} />
+            <>
+              <textarea ref={bodyRef} value={body} onChange={(e) => { setBody(e.target.value); touch() }} placeholder={L('写点什么…', 'Write something…')} aria-label={L('正文', 'Message body')} spellCheck={false} />
+              {sig && (
+                <div className="c-sig">
+                  <span className="k">{L('签名（发送时自动加在末尾）', 'Signature (added when sent)')}</span>
+                  <MdView className="sig-preview" md={sig} />
+                </div>
+              )}
+            </>
           ) : (
-            <div className="preview" dangerouslySetInnerHTML={{ __html: mdPreview(body) || `<p style="color:var(--ter)">${L('（空）', '(empty)')}</p>` }} />
+            <MdView className="preview" md={withSigMd} />
           )}
           {initial.quote && (
             <div style={{ padding: '0 24px 8px' }}>
