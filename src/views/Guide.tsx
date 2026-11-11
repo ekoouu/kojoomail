@@ -83,6 +83,7 @@ function GuideZh() {
         <h2 className="gh">写信和待办</h2>
         <div className="group sq">
           <Item k="写信">C 键或左上角的笔。正文支持 Markdown（**加粗**、- 列表），也可以点正文上方的 B、I、列表、引用、链接按钮。回复时自动用收到这封信的那个账号；换发件账号时签名跟着换。</Item>
+          <Item k="签名">设置 → 账号里每个邮箱单独写，写邮件时自动加在末尾。写信时它排好版显示在正文下方，不在编辑框里，改签名回设置改。和正文一样支持 Markdown：**加粗**、[文字](网址)、![说明](图片网址)，点「预览」看发出去的样子。也能直接写 HTML 调颜色和排版，比如 {'<span style="color:#C63E1F">文字</span>'}、{'<font color="#1B4A80">文字</font>'} 和表格；图片用 https 地址或内嵌 base64。为了安全只放行排版用的标签和样式：脚本、表单、iframe、定位和动画、CSS 里的 url() 都会被删掉。块级 HTML 要单独成段：前后各空一行，中间不留空行。</Item>
           <Item k="附件">读信时点附件直接用电脑上的程序打开，旁边的下载按钮存到「下载」文件夹。程序、脚本这类文件（.exe、.bat 等）不直接打开，要先保存。</Item>
           <Item k="撤销发送">点发送后有几秒可以撤销（秒数在设置 → 通知与隐私里改），撤销后回到编辑状态，附件、抄送都还在。</Item>
           <Item k="草稿">写到一半关掉会自动存草稿，在左侧「草稿」里继续写。</Item>
@@ -180,6 +181,7 @@ function GuideEn() {
         <h2 className="gh">Writing and to-dos</h2>
         <div className="group sq">
           <Item k="Compose">C key or the pen at the top left. The body supports Markdown (**bold**, - lists), or use the B, I, list, quote and link buttons above it. Replies are sent from the account that received the email; switching the sending account switches the signature too.</Item>
+          <Item k="Signature">Set one per mailbox in Settings → Accounts; it's added to the end of the emails you write. While composing it appears formatted below the body, outside the editing box; change it back in Settings. Like the body, it supports Markdown: **bold**, [text](link), ![description](image link). Click "Preview" to see how it will look when sent. You can also write HTML for colors and layout, such as {'<span style="color:#C63E1F">text</span>'}, {'<font color="#1B4A80">text</font>'} and tables; images use an https address or inline base64. For safety only layout tags and styles are kept: scripts, forms, iframes, positioning and animation, and url() in CSS are all removed. Keep block-level HTML in its own block: a blank line before and after, and none inside.</Item>
           <Item k="Attachments">Click an attachment while reading to open it with an app on your computer; the download button next to it saves it to Downloads. Programs and scripts (.exe, .bat and so on) aren't opened directly; save them first.</Item>
           <Item k="Undo send">After clicking Send you have a few seconds to undo (set the seconds in Settings → Notifications & privacy). Undo brings you back to editing with attachments and Cc intact.</Item>
           <Item k="Drafts">Close an email halfway and it's saved as a draft; continue it under Drafts on the left.</Item>
