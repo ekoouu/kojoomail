@@ -81,6 +81,7 @@ type S = {
   select: (id: number | null) => Promise<void>
   reloadOpen: () => Promise<void>
   toggleCheck: (id: number) => void
+  selectAllView: () => Promise<void>
   mark: (ids: number[], p: { seen?: boolean; flagged?: boolean }) => Promise<void>
   /** 一键已读：当前列表（视图、账号、页签、搜索）里的未读全部标为已读，可撤销 */
   markAllRead: () => Promise<void>
@@ -328,6 +329,16 @@ export const useApp = create<S>((set, get) => ({
     set({ checked: c })
   },
 
+  selectAllView: async () => {
+    const s = get()
+    try {
+      const ids = await api.viewIds({ ...queryFor(s, 0, 1), maxId: null })
+      set({ checked: new Set(ids) })
+      if (!ids.length) get().toast(L('当前视图没有可选择的邮件', 'There are no selectable emails in this view'))
+      else if (ids.length >= 5000 && s.total > ids.length) get().toast(L(`已选择前 ${ids.length} 封（当前视图共 ${s.total} 封）`, `Selected the first ${ids.length} of ${s.total} emails in this view`), { ttl: 6000 })
+    } catch (e) { get().toast(errText(e), { kind: 'err' }) }
+  },
+
   markAllRead: () => bulkRead({}, L('这里没有未读邮件', 'No unread emails here'), (n) => L(`已把 ${n} 封标为已读`, `Marked ${n} as read`), (n) => L(`把这里的 ${n} 封未读邮件都标为已读？`, `Mark all ${n} unread emails here as read?`)),
   tidy: () => bulkRead({ filter: 'bulk', search: '' }, L('通知和订阅都已经读过了', 'All notifications and newsletters are already read'), (n) => L(`已把 ${n} 封通知和订阅标为已读`, `Marked ${n} notifications and newsletters as read`), (n) => L(`把 ${n} 封没读的通知和订阅都标为已读？`, `Mark ${n} unread notifications and newsletters as read?`)),
   loadCats: async () => {
@@ -359,7 +370,7 @@ export const useApp = create<S>((set, get) => ({
   move: async (ids, target, label) => {
     const s = get()
     const picked = s.items.filter((m) => ids.includes(m.id))
-    if (target === 'trash' && picked.length && picked.every((m) => m.role === 'trash')) {
+    if (target === 'trash' && picked.length === ids.length && picked.length > 0 && picked.every((m) => m.role === 'trash')) {
       if (await ask(L(`彻底删除这 ${picked.length} 封邮件？删除后不能恢复。`, `Permanently delete ${picked.length === 1 ? 'this email' : `these ${picked.length} emails`}? This can't be undone.`))) await get().removeForever(ids)
       return
     }
@@ -389,15 +400,17 @@ export const useApp = create<S>((set, get) => ({
     try {
       await api.deleteForever(ids)
       get().toast(L(`已彻底删除 ${ids.length} 封邮件`, ids.length === 1 ? 'Email permanently deleted' : `${ids.length} emails permanently deleted`))
+      get().refreshMeta()
     } catch (e) {
       get().toast(errText(e), { kind: 'err' })
+      get().loadList(true)
     }
   },
 
   later: async (ids, until) => {
     await api.snooze(ids, until)
     if (until) {
-      set({ items: get().items.filter((m) => !ids.includes(m.id) || get().view.kind === 'later') })
+      set({ items: get().items.filter((m) => !ids.includes(m.id) || get().view.kind === 'later'), checked: new Set() })
       if (get().selected && ids.includes(get().selected!) && get().view.kind !== 'later') set({ selected: null, open: null })
       get().toast(L('已放到「稍后处理」', 'Snoozed'))
     }

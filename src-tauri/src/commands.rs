@@ -679,8 +679,8 @@ pub async fn snooze(ctx: State<'_, Arc<Ctx>>, ids: Vec<i64>, until: Option<i64>)
 #[tauri::command]
 pub async fn move_to(ctx: State<'_, Arc<Ctx>>, ids: Vec<i64>, target: String) -> Res<u64> {
     let rows = locate(&ctx, &ids);
-    if rows.is_empty() {
-        return Err(crate::i18n::t("邮件还在同步中，稍后再试", "Still syncing. Try again in a moment.").into());
+    if rows.len() != ids.len() {
+        return Err(crate::i18n::t("有邮件还在同步中，这次没有移动任何邮件，请稍后再试", "Some emails are still syncing. Nothing was moved; try again in a moment.").into());
     }
     let what = match target.as_str() { "archive" => crate::i18n::t("归档", "Archive"), "trash" => crate::i18n::t("已删除", "Trash"), "junk" => crate::i18n::t("垃圾邮件", "Junk"), "inbox" => crate::i18n::t("收件箱", "Inbox"), _ => crate::i18n::t("目标文件夹", "target folder") };
     // (账号, 原路径, 目标路径, 目标文件夹 id, [(邮件 id, uid)])
@@ -780,6 +780,9 @@ pub async fn undo_move(ctx: State<'_, Arc<Ctx>>, token: u64) -> Res<bool> {
 #[tauri::command]
 pub async fn delete_forever(ctx: State<'_, Arc<Ctx>>, ids: Vec<i64>) -> Res<()> {
     let rows = locate(&ctx, &ids);
+    if rows.len() != ids.len() {
+        return Err(crate::i18n::t("有邮件还在同步中，这次没有删除任何邮件，请稍后再试", "Some emails are still syncing. Nothing was deleted; try again in a moment.").into());
+    }
     {
         let st = ctx.store.lock().unwrap();
         st.delete_messages(&ids).map_err(e)?;
@@ -814,6 +817,67 @@ pub async fn empty_folder(ctx: State<'_, Arc<Ctx>>, folder_id: i64) -> Res<u64> 
     worker_send(&ctx, acc, Op::Empty { path });
     changed(&ctx);
     Ok(ids.len() as u64)
+}
+
+async fn folder_op_result(rx: tokio::sync::oneshot::Receiver<Result<(), String>>) -> Res<()> {
+    match tokio::time::timeout(Duration::from_secs(45), rx).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => Err(crate::i18n::t("文件夹操作没有完成", "The folder operation didn't complete").into()),
+        Err(_) => Err(crate::i18n::t("文件夹操作超时，请检查网络后重试", "The folder operation timed out. Check your connection and try again.").into()),
+    }
+}
+
+#[tauri::command]
+pub async fn create_folder(ctx: State<'_, Arc<Ctx>>, account_id: i64, name: String, parent_folder_id: Option<i64>) -> Res<()> {
+    let parent = if let Some(id) = parent_folder_id {
+        let (acc, path): (i64, String) = ctx.store.lock().unwrap().conn
+            .query_row("SELECT account_id, path FROM folders WHERE id=?", [id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(e)?;
+        if acc != account_id {
+            return Err(crate::i18n::t("父文件夹不属于这个账号", "The parent folder belongs to another account").into());
+        }
+        Some(path)
+    } else {
+        None
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let workers = ctx.workers.lock().unwrap();
+        let Some(w) = workers.get(&account_id) else { return Err(crate::i18n::t("这个账号没有在运行", "This account isn't running").into()) };
+        w.send(Op::FolderCreate { parent, name, reply: tx });
+    }
+    folder_op_result(rx).await
+}
+
+#[tauri::command]
+pub async fn rename_folder(ctx: State<'_, Arc<Ctx>>, folder_id: i64, name: String) -> Res<()> {
+    let (acc, path, role): (i64, String, String) = ctx.store.lock().unwrap().conn
+        .query_row("SELECT account_id, path, role FROM folders WHERE id=?", [folder_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(e)?;
+    if !role.is_empty() {
+        return Err(crate::i18n::t("系统文件夹不能重命名", "System folders can't be renamed").into());
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let workers = ctx.workers.lock().unwrap();
+        let Some(w) = workers.get(&acc) else { return Err(crate::i18n::t("这个账号没有在运行", "This account isn't running").into()) };
+        w.send(Op::FolderRename { path, name, reply: tx });
+    }
+    folder_op_result(rx).await
+}
+
+#[tauri::command]
+pub async fn delete_folder(ctx: State<'_, Arc<Ctx>>, folder_id: i64) -> Res<()> {
+    let (acc, path, role): (i64, String, String) = ctx.store.lock().unwrap().conn
+        .query_row("SELECT account_id, path, role FROM folders WHERE id=?", [folder_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(e)?;
+    if !role.is_empty() {
+        return Err(crate::i18n::t("系统文件夹不能删除", "System folders can't be deleted").into());
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let workers = ctx.workers.lock().unwrap();
+        let Some(w) = workers.get(&acc) else { return Err(crate::i18n::t("这个账号没有在运行", "This account isn't running").into()) };
+        w.send(Op::FolderDelete { path, reply: tx });
+    }
+    folder_op_result(rx).await
 }
 
 #[tauri::command]

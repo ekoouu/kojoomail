@@ -39,6 +39,9 @@ pub enum Op {
     Delete { path: String, uids: Vec<u32> },
     /// 清空整个文件夹（只用于「已删除」「垃圾邮件」），包括本地没同步下来的旧邮件
     Empty { path: String },
+    FolderCreate { parent: Option<String>, name: String, reply: oneshot::Sender<Result<(), String>> },
+    FolderRename { path: String, name: String, reply: oneshot::Sender<Result<(), String>> },
+    FolderDelete { path: String, reply: oneshot::Sender<Result<(), String>> },
     Append { role: &'static str, raw: Vec<u8> },
     SyncFolder { folder_id: i64 },
     SyncAll,
@@ -53,6 +56,7 @@ impl Op {
             Op::Move { from, uids, to, ids } => Op::Move { from: from.clone(), uids: uids.clone(), to: to.clone(), ids: ids.clone() },
             Op::Delete { path, uids } => Op::Delete { path: path.clone(), uids: uids.clone() },
             Op::Empty { path } => Op::Empty { path: path.clone() },
+            Op::FolderCreate { .. } | Op::FolderRename { .. } | Op::FolderDelete { .. } => return None,
             Op::Append { role, raw } => Op::Append { role, raw: raw.clone() },
             Op::SyncFolder { folder_id } => Op::SyncFolder { folder_id: *folder_id },
             Op::SyncAll => Op::SyncAll,
@@ -115,6 +119,9 @@ fn park_ops(rx: &mut mpsc::UnboundedReceiver<Op>, backlog: &mut Backlog, why: &s
     while let Ok(op) = rx.try_recv() {
         match op {
             Op::Body { reply, .. } => {
+                let _ = reply.send(Err(why.to_string()));
+            }
+            Op::FolderCreate { reply, .. } | Op::FolderRename { reply, .. } | Op::FolderDelete { reply, .. } => {
                 let _ = reply.send(Err(why.to_string()));
             }
             op => {
@@ -914,6 +921,90 @@ impl SessionWorker {
         Ok(())
     }
 
+    async fn hierarchy_delimiter(&mut self) -> Result<String> {
+        let names: Vec<async_imap::types::Name> = self.sess().list(Some(""), Some("%")).await?.try_collect().await?;
+        Ok(names.iter().find_map(|n| n.delimiter()).unwrap_or("/").to_string())
+    }
+
+    fn folder_leaf(path: &str, delimiter: &str) -> String {
+        let decoded = text::decode_mutf7(path);
+        decoded.rsplit(delimiter).next().unwrap_or(&decoded).to_string()
+    }
+
+    fn checked_folder_name(name: &str, delimiter: &str) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("{}", crate::i18n::t("文件夹名称不能为空", "Folder name can't be empty")));
+        }
+        if name.chars().any(|c| c.is_control()) || name.contains(delimiter) {
+            return Err(anyhow!(tr!("文件夹名称不能包含「{delimiter}」", "Folder names can't contain \"{delimiter}\"")));
+        }
+        Ok(name.to_string())
+    }
+
+    async fn create_folder(&mut self, parent: Option<String>, name: String) -> Result<()> {
+        let delimiter = self.hierarchy_delimiter().await?;
+        let name = Self::checked_folder_name(&name, &delimiter)?;
+        let encoded = text::encode_mutf7(&name);
+        let path = parent.map(|p| format!("{p}{delimiter}{encoded}")).unwrap_or(encoded);
+        self.sess().create(&path).await.map_err(|e| anyhow!(tr!("创建文件夹「{name}」失败：{e}", "Couldn't create folder \"{name}\": {e}")))?;
+        self.sync_folder_list().await?;
+        Ok(())
+    }
+
+    async fn rename_folder(&mut self, path: String, name: String) -> Result<()> {
+        let delimiter = self.hierarchy_delimiter().await?;
+        let name = Self::checked_folder_name(&name, &delimiter)?;
+        let encoded = text::encode_mutf7(&name);
+        let parent = path.rsplit_once(&delimiter).map(|(p, _)| p);
+        let new_path = parent.map(|p| format!("{p}{delimiter}{encoded}")).unwrap_or(encoded);
+        if new_path == path {
+            return Ok(());
+        }
+        let old_prefix = format!("{path}{delimiter}");
+        if self.selected == path || self.selected.starts_with(&old_prefix) {
+            let _ = self.select("INBOX").await;
+        }
+        self.sess().rename(&path, &new_path).await.map_err(|e| anyhow!(tr!("重命名文件夹失败：{e}", "Couldn't rename folder: {e}")))?;
+        let new_prefix = format!("{new_path}{delimiter}");
+        {
+            let st = self.ctx.store.lock().unwrap();
+            let rows: Vec<(i64, String)> = {
+                let mut q = st.conn.prepare("SELECT id, path FROM folders WHERE account_id=?")?;
+                let v = q.query_map([self.cfg.id], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(|x| x.ok()).collect();
+                v
+            };
+            let tx = st.conn.unchecked_transaction()?;
+            for (id, old) in rows {
+                let next = if old == path {
+                    Some(new_path.clone())
+                } else {
+                    old.strip_prefix(&old_prefix).map(|suffix| format!("{new_prefix}{suffix}"))
+                };
+                if let Some(next) = next {
+                    let leaf = Self::folder_leaf(&next, &delimiter);
+                    tx.execute("UPDATE folders SET path=?, name=? WHERE id=?", params![next, leaf, id])?;
+                }
+            }
+            tx.commit()?;
+        }
+        self.selected.clear();
+        self.sync_folder_list().await?;
+        Ok(())
+    }
+
+    async fn delete_folder(&mut self, path: String) -> Result<()> {
+        let delimiter = self.hierarchy_delimiter().await?;
+        let prefix = format!("{path}{delimiter}");
+        if self.selected == path || self.selected.starts_with(&prefix) {
+            let _ = self.select("INBOX").await;
+        }
+        self.sess().delete(&path).await.map_err(|e| anyhow!(tr!("删除文件夹失败：{e}", "Couldn't delete folder: {e}")))?;
+        self.selected.clear();
+        self.sync_folder_list().await?;
+        Ok(())
+    }
+
     async fn do_op(&mut self, op: Op) -> Result<()> {
         match op {
             op @ (Op::Body { .. } | Op::Flags { .. }) => self.do_light(op).await?,
@@ -968,6 +1059,18 @@ impl SessionWorker {
                     let _: Vec<_> = self.sess().uid_store(&set, "+FLAGS.SILENT (\\Deleted)").await?.try_collect().await?;
                     self.expunge(&set, &uids).await?;
                 }
+            }
+            Op::FolderCreate { parent, name, reply } => {
+                let r = self.create_folder(parent, name).await.map_err(|e| e.to_string());
+                let _ = reply.send(r);
+            }
+            Op::FolderRename { path, name, reply } => {
+                let r = self.rename_folder(path, name).await.map_err(|e| e.to_string());
+                let _ = reply.send(r);
+            }
+            Op::FolderDelete { path, reply } => {
+                let r = self.delete_folder(path).await.map_err(|e| e.to_string());
+                let _ = reply.send(r);
             }
             Op::Empty { path } => {
                 if self.select(&path).await?.exists > 0 {

@@ -1,5 +1,6 @@
 //! 文本小工具：HTML 转纯文本（做预览和搜索用）、IMAP 文件夹名解码、提示词注入过滤。
 
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -104,6 +105,40 @@ pub fn sanitize_for_llm(s: &str) -> String {
     r.replace_all(s, "[已过滤]").into_owned()
 }
 
+/// IMAP 修改版 UTF-7 文件夹名编码（服务器上的文件夹路径使用这个编码）
+pub fn encode_mutf7(s: &str) -> String {
+    let mut out = String::new();
+    let mut unicode = String::new();
+    let flush = |buf: &mut String, out: &mut String| {
+        if buf.is_empty() {
+            return;
+        }
+        let mut bytes = Vec::with_capacity(buf.len() * 2);
+        for u in buf.encode_utf16() {
+            bytes.extend_from_slice(&u.to_be_bytes());
+        }
+        let b64 = STANDARD_NO_PAD.encode(bytes).replace('/', ",");
+        out.push('&');
+        out.push_str(&b64);
+        out.push('-');
+        buf.clear();
+    };
+    for c in s.chars() {
+        if c.is_ascii() && (' '..='~').contains(&c) {
+            flush(&mut unicode, &mut out);
+            if c == '&' {
+                out.push_str("&-");
+            } else {
+                out.push(c);
+            }
+        } else {
+            unicode.push(c);
+        }
+    }
+    flush(&mut unicode, &mut out);
+    out
+}
+
 /// IMAP 修改版 UTF-7 文件夹名解码（"&U,BTFw-" → "草稿"）
 pub fn decode_mutf7(s: &str) -> String {
     let mut out = String::new();
@@ -170,6 +205,9 @@ mod tests {
         assert_eq!(decode_mutf7("&g0l6P3ux-"), "草稿箱");
         assert_eq!(decode_mutf7("INBOX"), "INBOX");
         assert_eq!(decode_mutf7("A&-B"), "A&B");
+        assert_eq!(encode_mutf7("草稿箱"), "&g0l6P3ux-");
+        assert_eq!(encode_mutf7("A&B"), "A&-B");
+        assert_eq!(decode_mutf7(&encode_mutf7("项目/客户 A")), "项目/客户 A");
     }
     #[test]
     fn injection() {

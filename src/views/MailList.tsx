@@ -22,9 +22,17 @@ export function laterOptions(): [string, number][] {
 /** 这些邮件都在同一个账号里就返回账号 id（跨账号不能移到某个具体文件夹） */
 function sameAccount(ids: number[]): number | null {
   const s = useApp.getState()
-  const accs = new Set(ids.map((id) => (s.items.find((x) => x.id === id) ?? (s.open?.id === id ? s.open : undefined))?.accountId))
-  const [a] = [...accs]
-  return accs.size === 1 && a ? a : null
+  const accs = new Set<number>()
+  let missing = false
+  for (const id of ids) {
+    const m = s.items.find((x) => x.id === id) ?? (s.open?.id === id ? s.open : undefined)
+    if (m) accs.add(m.accountId)
+    else missing = true
+  }
+  if (accs.size > 1) return null
+  if (!missing && accs.size === 1) return [...accs][0]
+  const scoped = s.view.kind === 'folder' ? s.view.accountId : s.view.kind === 'all' ? s.view.accountId : undefined
+  return scoped && (accs.size === 0 || accs.has(scoped)) ? scoped : null
 }
 
 /** 「移动到…」：列出这个账号的文件夹，可以按名字筛 */
@@ -60,6 +68,15 @@ export function MovePicker() {
 
 export function mailMenu(m: MsgLite, ids: number[]): MenuItem[] {
   const s = useApp.getState()
+  const picked = ids.map((id) => s.items.find((x) => x.id === id) ?? (s.open?.id === id ? s.open : undefined)).filter((x): x is MsgLite => !!x)
+  const complete = picked.length === ids.length
+  const viewRole = s.view.kind === 'folder' ? s.folders.find((f) => f.id === s.view.folderId)?.role : undefined
+  const allSeen = complete && picked.every((x) => x.seen)
+  const allFlagged = complete && picked.every((x) => x.flagged)
+  const allTrash = complete ? picked.every((x) => x.role === 'trash') : viewRole === 'trash'
+  const anyNotInbox = complete ? picked.some((x) => x.role !== 'inbox') : viewRole ? viewRole !== 'inbox' : m.role !== 'inbox'
+  const anyNotArchive = complete ? picked.some((x) => x.role !== 'archive' && x.role !== 'all') : viewRole ? viewRole !== 'archive' && viewRole !== 'all' : m.role !== 'archive' && m.role !== 'all'
+  const anyNotJunk = complete ? picked.some((x) => x.role !== 'junk') : viewRole ? viewRole !== 'junk' : m.role !== 'junk'
   const open = async (mode: 'reply' | 'replyAll' | 'forward') => {
     try { s.openCompose(mode, await api.get(m.id)) } catch (e) { s.toast(errText(e), { kind: 'err' }) }
   }
@@ -73,20 +90,20 @@ export function mailMenu(m: MsgLite, ids: number[]): MenuItem[] {
     )
   }
   items.push(
-    { label: m.seen ? L('标为未读', 'Mark as unread') : L('标为已读', 'Mark as read'), icon: 'mail', key: 'U', run: () => s.mark(ids, { seen: !m.seen }) },
-    { label: m.flagged ? L('取消重点', 'Remove from Important') : L('标为重点', 'Mark as important'), icon: 'flag', key: 'S', run: () => s.mark(ids, { flagged: !m.flagged }) },
+    { label: allSeen ? L('标为未读', 'Mark as unread') : L('标为已读', 'Mark as read'), icon: 'mail', key: 'U', run: () => { s.mark(ids, { seen: !allSeen }); if (ids.length > 1) s.set({ checked: new Set() }) } },
+    { label: allFlagged ? L('取消重点', 'Remove from Important') : L('标为重点', 'Mark as important'), icon: 'flag', key: 'S', run: () => { s.mark(ids, { flagged: !allFlagged }); if (ids.length > 1) s.set({ checked: new Set() }) } },
     ...laterOptions().map(([label, t]): MenuItem => ({ label: L(`稍后处理：${label}`, `Snooze: ${label}`), icon: 'clock', run: () => s.later(ids, t) })),
     'sep',
   )
-  if (m.role !== 'inbox') items.push({ label: L('移回收件箱', 'Move to Inbox'), icon: 'inbox', run: () => s.move(ids, 'inbox', L('移回收件箱', 'moved to Inbox')) })
-  if (m.role !== 'archive' && m.role !== 'all') items.push({ label: L('归档', 'Archive'), icon: 'archive', key: 'E', run: () => s.move(ids, 'archive', L('归档', 'archived')) })
+  if (anyNotInbox) items.push({ label: L('移回收件箱', 'Move to Inbox'), icon: 'inbox', run: () => s.move(ids, 'inbox', L('移回收件箱', 'moved to Inbox')) })
+  if (anyNotArchive) items.push({ label: L('归档', 'Archive'), icon: 'archive', key: 'E', run: () => s.move(ids, 'archive', L('归档', 'archived')) })
   if (m.role === 'inbox' && ids.length === 1 && m.fromAddr) {
     items.push({ label: L(`归档 ${m.fromName || m.fromAddr} 的所有邮件`, `Archive all from ${m.fromName || m.fromAddr}`), icon: 'archive', run: () => s.bulkArchive({ filter: `from:${m.fromAddr}`, view: 'all', accountId: null }, L(`来自 ${m.fromName || m.fromAddr} 的邮件`, `emails from ${m.fromName || m.fromAddr}`)) })
   }
   const acc = sameAccount(ids)
   if (acc) items.push({ label: L('移动到…', 'Move to…'), icon: 'folder', run: () => s.set({ movePick: { ids, accountId: acc } }) })
-  if (m.role !== 'junk') items.push({ label: L('标为垃圾邮件', 'Mark as junk'), icon: 'ban', run: () => s.move(ids, 'junk', L('移到垃圾邮件', 'moved to Junk')) })
-  if (m.role === 'trash') items.push({ label: L('彻底删除', 'Delete forever'), icon: 'trash', danger: true, run: async () => { if (await ask(L(`彻底删除 ${ids.length} 封邮件？删除后无法恢复。`, `Permanently delete ${plural(ids.length, '', 'email')}? This can't be undone.`))) s.removeForever(ids) } })
+  if (anyNotJunk) items.push({ label: L('标为垃圾邮件', 'Mark as junk'), icon: 'ban', run: () => s.move(ids, 'junk', L('移到垃圾邮件', 'moved to Junk')) })
+  if (allTrash) items.push({ label: L('彻底删除', 'Delete forever'), icon: 'trash', danger: true, run: async () => { if (await ask(L(`彻底删除 ${ids.length} 封邮件？删除后无法恢复。`, `Permanently delete ${plural(ids.length, '', 'email')}? This can't be undone.`))) s.removeForever(ids) } })
   else items.push({ label: L('删除', 'Delete'), icon: 'trash', key: 'Del', run: () => s.move(ids, 'trash', L('删除', 'deleted')) })
   return items
 }
@@ -94,6 +111,7 @@ export function mailMenu(m: MsgLite, ids: number[]): MenuItem[] {
 export default function MailList() {
   const s = useApp()
   const rowsRef = useRef<HTMLDivElement>(null)
+  const selectionAnchor = useRef<number | null>(null)
   const menu = useMenu()
   const [drafts, setDrafts] = useState<Draft[] | null>(null)
   const isDrafts = s.view.kind === 'drafts'
@@ -145,12 +163,56 @@ export default function MailList() {
   }
 
   const checked = [...s.checked]
-  const bulkBase = s.items.find((m) => m.id === checked[0])
+  const selectedRows = s.items.filter((m) => s.checked.has(m.id))
+  const selectedComplete = selectedRows.length === checked.length
+  const checkedLoaded = selectedRows.length
+  const allLoaded = s.items.length > 0 && checkedLoaded === s.items.length
+  const allSeen = selectedComplete && selectedRows.length > 0 && selectedRows.every((m) => m.seen)
+  const allFlagged = selectedComplete && selectedRows.length > 0 && selectedRows.every((m) => m.flagged)
+  const allTrash = selectedComplete && selectedRows.length > 0 && selectedRows.every((m) => m.role === 'trash')
+  const inTrashView = folder?.role === 'trash'
+
+  const toggleLoaded = () => {
+    const next = new Set(s.checked)
+    if (allLoaded) s.items.forEach((m) => next.delete(m.id))
+    else s.items.forEach((m) => next.add(m.id))
+    s.set({ checked: next })
+    if (!allLoaded && s.items.length) selectionAnchor.current = s.items[0].id
+  }
+
+  const rangeSelect = (id: number) => {
+    const anchor = selectionAnchor.current ?? s.selected ?? checked[0] ?? id
+    const a = s.items.findIndex((m) => m.id === anchor)
+    const b = s.items.findIndex((m) => m.id === id)
+    if (a < 0 || b < 0) { selectionAnchor.current = id; s.toggleCheck(id); return }
+    const next = new Set(s.checked)
+    for (const m of s.items.slice(Math.min(a, b), Math.max(a, b) + 1)) next.add(m.id)
+    s.set({ checked: next })
+    if (selectionAnchor.current == null) selectionAnchor.current = anchor
+  }
+
+  const deleteChecked = async () => {
+    if (allTrash || inTrashView) {
+      if (await ask(L(`彻底删除 ${checked.length} 封邮件？删除后无法恢复。`, `Permanently delete ${plural(checked.length, '', 'email')}? This can't be undone.`))) s.removeForever(checked)
+    } else s.move(checked, 'trash', L('删除', 'deleted'))
+  }
+
+  const bulkMore = (el: HTMLElement) => {
+    const items: MenuItem[] = [
+      { label: allFlagged ? L('取消重点', 'Remove from Important') : L('标为重点', 'Mark as important'), icon: 'flag', run: () => { s.mark(checked, { flagged: !allFlagged }); s.set({ checked: new Set() }) } },
+      ...laterOptions().map(([label, t]): MenuItem => ({ label: L(`稍后处理：${label}`, `Snooze: ${label}`), icon: 'clock', run: () => s.later(checked, t) })),
+      'sep',
+    ]
+    if (selectedRows.some((m) => m.role !== 'inbox')) items.push({ label: L('移回收件箱', 'Move to Inbox'), icon: 'inbox', run: () => s.move(checked, 'inbox', L('移回收件箱', 'moved to Inbox')) })
+    if (selectedRows.some((m) => m.role !== 'junk')) items.push({ label: L('标为垃圾邮件', 'Mark as junk'), icon: 'ban', run: () => s.move(checked, 'junk', L('移到垃圾邮件', 'moved to Junk')) })
+    menu.openBelow(el, items)
+  }
 
   return (
     <section className="list" aria-label={L('邮件列表', 'Email list')}>
       <div className="list-head">
         <div className="row" style={{ alignItems: 'baseline', gap: 8 }}>
+          {!isDrafts && s.items.length > 0 && <button className={`bulk-check${checkedLoaded ? ' some' : ''}${allLoaded ? ' all' : ''}`} aria-label={allLoaded ? L('取消选择已加载邮件', 'Deselect loaded emails') : L('选择已加载邮件', 'Select loaded emails')} aria-pressed={allLoaded} onClick={toggleLoaded}>{allLoaded ? <Icon name="check" size={14} /> : checkedLoaded ? <Icon name="minus" size={13} /> : null}</button>}
           <h1 className="truncate">{title}</h1>
           <span style={{ fontSize: 12.5, color: 'var(--ter)', whiteSpace: 'nowrap' }}>{isDrafts ? plural(drafts?.length ?? 0, '封', 'draft') : sub}</span>
           {canTidy && <button className="tb tidy" style={{ marginLeft: 'auto', alignSelf: 'center' }} aria-label={L('整理', 'Tidy up')} data-tip={L('整理通知和订阅', 'Tidy up notifications and newsletters')} onClick={(e) => tidyMenu(e.currentTarget)}><Icon name="sparkle" />{L('整理', 'Tidy up')}<Icon name="down" size={12} /></button>}
@@ -163,14 +225,17 @@ export default function MailList() {
           )}
           {!isDrafts && <button className="tb" style={{ alignSelf: 'center', marginLeft: s.search || folder?.role === 'drafts' ? 'auto' : undefined }} aria-label={L('刷新', 'Refresh')} data-tip={L('立即同步', 'Sync now')} onClick={() => { api.syncNow(); s.loadList(true) }}><Icon name="refresh" /></button>}
         </div>
-        {checked.length > 0 && bulkBase ? (
-          <div className="row" style={{ marginTop: 12, height: 30, padding: '0 4px 0 12px', borderRadius: 8, background: 'var(--invert)', color: 'var(--invert-text)' }}>
-            <span className="grow" style={{ fontSize: 12.5, fontWeight: 600 }}>{L(`已选 ${checked.length} 封`, `${checked.length} selected`)}</span>
-            <button className="tb" style={{ color: 'inherit', width: 26, height: 26 }} aria-label={L('归档', 'Archive')} data-tip={L('归档', 'Archive')} onClick={() => s.move(checked, 'archive', L('归档', 'archived'))}><Icon name="archive" size={15} /></button>
-            <button className="tb" style={{ color: 'inherit', width: 26, height: 26 }} aria-label={L('标为已读', 'Mark as read')} data-tip={L('标为已读', 'Mark as read')} onClick={() => { s.mark(checked, { seen: true }); s.set({ checked: new Set() }) }}><Icon name="mail" size={15} /></button>
-            {sameAccount(checked) && <button className="tb" style={{ color: 'inherit', width: 26, height: 26 }} aria-label={L('移动到', 'Move to')} data-tip={L('移动到…', 'Move to…')} onClick={() => s.set({ movePick: { ids: checked, accountId: sameAccount(checked)! } })}><Icon name="folder" size={15} /></button>}
-            <button className="tb" style={{ color: 'inherit', width: 26, height: 26 }} aria-label={L('删除', 'Delete')} data-tip={L('删除', 'Delete')} onClick={() => s.move(checked, 'trash', L('删除', 'deleted'))}><Icon name="trash" size={15} /></button>
-            <button className="tb" style={{ color: 'inherit', width: 26, height: 26 }} aria-label={L('取消选择', 'Clear selection')} data-tip={L('取消选择', 'Clear selection')} onClick={() => s.set({ checked: new Set() })}><Icon name="x" size={15} /></button>
+        {checked.length > 0 ? (
+          <div className="row bulk-bar">
+            <span className="grow" style={{ fontSize: 12.5, fontWeight: 600, whiteSpace: 'nowrap' }}>{L(`已选 ${checked.length} 封`, `${checked.length} selected`)}</span>
+            {allLoaded && checked.length < s.total && checked.length < 5000 && <button className="bulk-all" onClick={() => s.selectAllView()}>{s.total > 5000 ? L('选择当前视图前 5000 封', 'Select first 5,000 in this view') : L(`选择当前视图全部 ${s.total} 封`, `Select all ${s.total} in this view`)}</button>}
+            {checked.length >= 5000 && s.total > checked.length && <span style={{ fontSize: 10.5, opacity: .7, whiteSpace: 'nowrap' }}>{L('已达 5000 封上限', '5,000 limit')}</span>}
+            <button className="tb" aria-label={L('归档', 'Archive')} data-tip={L('归档', 'Archive')} onClick={() => s.move(checked, 'archive', L('归档', 'archived'))}><Icon name="archive" size={15} /></button>
+            <button className="tb" aria-label={allSeen ? L('标为未读', 'Mark as unread') : L('标为已读', 'Mark as read')} data-tip={allSeen ? L('标为未读', 'Mark as unread') : L('标为已读', 'Mark as read')} onClick={() => { s.mark(checked, { seen: !allSeen }); s.set({ checked: new Set() }) }}><Icon name="mail" size={15} /></button>
+            {sameAccount(checked) && <button className="tb" aria-label={L('移动到', 'Move to')} data-tip={L('移动到…', 'Move to…')} onClick={() => s.set({ movePick: { ids: checked, accountId: sameAccount(checked)! } })}><Icon name="folder" size={15} /></button>}
+            <button className="tb" aria-label={allTrash || inTrashView ? L('彻底删除', 'Delete forever') : L('删除', 'Delete')} data-tip={allTrash || inTrashView ? L('彻底删除', 'Delete forever') : L('删除', 'Delete')} onClick={deleteChecked}><Icon name="trash" size={15} /></button>
+            <button className="tb" aria-label={L('更多操作', 'More actions')} data-tip={L('更多操作', 'More actions')} onClick={(e) => bulkMore(e.currentTarget)}><Icon name="more" size={15} /></button>
+            <button className="tb" aria-label={L('取消选择', 'Clear selection')} data-tip={L('取消选择', 'Clear selection')} onClick={() => s.set({ checked: new Set() })}><Icon name="x" size={15} /></button>
           </div>
         ) : !isDrafts && !s.search && (
           <div className="tabs-scroll" style={{ marginTop: 12 }}>
@@ -221,8 +286,16 @@ export default function MailList() {
                 <div
                   data-id={m.id}
                   className={`mrow${s.selected === m.id ? ' sel' : ''}${!m.seen && m.role !== 'sent' ? ' unread' : ''}${isChecked ? ' checked' : ''}`}
+                  draggable
+                  onDragStart={(e) => {
+                    const ids = s.checked.has(m.id) ? checked : [m.id]
+                    e.dataTransfer.effectAllowed = 'move'
+                    e.dataTransfer.setData('application/x-kojoomail-ids', JSON.stringify(ids))
+                  }}
                   onClick={(e) => {
-                    if (e.ctrlKey || e.metaKey || e.shiftKey || s.checked.size) { s.toggleCheck(m.id); return }
+                    if (e.shiftKey) { rangeSelect(m.id); return }
+                    if (e.ctrlKey || e.metaKey || s.checked.size) { selectionAnchor.current = m.id; s.toggleCheck(m.id); return }
+                    selectionAnchor.current = m.id
                     s.select(m.id)
                   }}
                   onContextMenu={(e) => {
@@ -232,7 +305,7 @@ export default function MailList() {
                   }}
                 >
                   {!m.seen && m.role !== 'sent' && <span className="udot" />}
-                  <span onClick={(e) => { e.stopPropagation(); s.toggleCheck(m.id) }} title={L('选择', 'Select')}>
+                  <span onClick={(e) => { e.stopPropagation(); if (e.shiftKey) rangeSelect(m.id); else { selectionAnchor.current = m.id; s.toggleCheck(m.id) } }} title={L('选择', 'Select')}>
                     {isChecked
                       ? <span className="avatar" style={{ background: 'var(--navy)', color: '#fff' }}><Icon name="check" size={18} /></span>
                       : <Avatar name={p.name} email={p.email} badge={s.accounts.length > 1 ? acc?.color : undefined} />}
