@@ -35,7 +35,7 @@ It is a desktop app, and your mail stays on your own computer. The AI uses your 
 
 Gmail, Outlook, iCloud, QQ Mail, NetEase 163/126, company mail and any account that supports IMAP. All accounts share one timeline, each with its own color. Replies go out from the address the email was sent to, so you never answer from the wrong account.
 
-Gmail and Outlook support **one-click sign-in** (you authorize in the browser; no password to type). The app follows your system proxy when it connects to mail servers.
+Gmail and Outlook support **one-click sign-in** (you authorize in the browser; no password to type). The app follows your system proxy when it connects to mail servers by default; if the system proxy is unreliable, you can enter your own proxy address or turn the proxy off in Settings → General → Proxy.
 
 ### AI notes: know what an email wants before you open it
 
@@ -80,6 +80,9 @@ To-dos the AI pulls out of your emails sit next to the ones you add yourself, gr
 | **Follow up** | Emails you sent more than 3 days ago that haven't had a reply |
 | **Bills & invoices** | Bills, invoices and payment notices from every account in one place |
 | **Snooze** | Put an email away and have it come back at the time you choose |
+| **Conversation view** | Emails from the same thread collapse into one row; open it to read the whole thread in order. Reply, archive and delete still act on a single email (off by default; turn it on in Settings → General) |
+| **Mail rules** | When new mail arrives in the inbox, move it to a folder, archive it, move it to spam, or mark it read or important, based on sender, recipient, subject or attachments. Rules run on your computer; they never delete mail or send anything |
+| **Verification codes** | The notification shows the code directly, and you can copy it with one click when you open the email. Detected locally, never sent to AI |
 | **Ask your mailbox** | Type a question in the search box, such as "What price did I quote Marco last time?", and the AI answers from your mail with sources |
 | **Dark mode** | Follows the system or set it yourself; frosted-glass effect on Windows 11 |
 | **Keyboard** | `J` `K` to move, `E` to archive, `R` to reply, `C` to compose, `Ctrl K` to search |
@@ -112,7 +115,16 @@ Memory in Windows Task Manager (the author's daily setup, Windows 11, measured N
 
 Open Settings → AI & Models (设置 → AI 与模型), pick a provider and paste your own API key. Any OpenAI-compatible service works. DeepSeek, Qwen, Kimi and OpenAI are built-in presets; for any other compatible endpoint, including a model you host yourself, just enter its URL. There is a daily analysis limit that you can adjust.
 
+Under "Custom instructions" you can describe your preferences, such as the tone of replies, how to address people and what to pay attention to. The AI takes them into account when it writes notes, drafts replies and follow-ups.
+
 Kojoo Mail works fine without AI, too: then it's simply a clean, lightweight multi-account mail client.
+
+### Use it from your own AI agent (MCP)
+
+Turn on the switch in Settings → AI & models → External AI agents (MCP), then copy the config snippet shown there into the MCP settings of an agent such as Claude Desktop or Cursor. The agent can then search and read the mail and AI notes already synced to this computer.
+
+- **Read-only**: it cannot send, delete or move email
+- **Off by default**; mailboxes with "Allow AI" turned off stay invisible to the agent
 
 ## Download
 
@@ -156,9 +168,13 @@ bash scripts/build-mac.sh          # macOS (run on a Mac)
 
 Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting.
 
+See the [roadmap](https://github.com/ekoouu/kojoomail/issues/6) for what's planned and in progress, and [Releases](https://github.com/ekoouu/kojoomail/releases) for what changed in each version.
+
 ## Acknowledgements
 
 Thanks to the [LINUX DO](https://linux.do) community, where this project was first shared and got its early feedback.
+
+Thanks to everyone who has contributed code: [@Birdy0109](https://github.com/Birdy0109).
 
 ## License
 
