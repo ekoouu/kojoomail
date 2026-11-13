@@ -143,6 +143,13 @@ a { color: var(--navy); }
 /* 贴着窗口底边、右边的按钮：提示往上、靠右弹，免得撑出滚动条（侧栏底部的设置按钮） */
 [data-tip][data-tip-pos="up"]:hover::after { top: auto; bottom: calc(100% + 6px); left: auto; right: 0; transform: none; }
 @keyframes tipin { from { opacity: 0; } to { opacity: 1; } }
+/* 文字被截断时的全文提示：挂在 body 上，长句子换行、左右夹在窗口内（见 ui.tsx 的 TipText） */
+.tip-box {
+  position: fixed; z-index: 100; max-width: min(360px, calc(100vw - 16px)); padding: 6px 9px; border-radius: 8px;
+  background: #0F1C2A; color: #fff; font-size: 12px; line-height: 1.45; white-space: normal; word-break: break-word;
+  pointer-events: none; box-shadow: 0 6px 16px -6px rgba(15, 28, 42, .5); animation: tipin .12s ease .4s both;
+}
+:root[data-theme="dark"] .tip-box { background: #ECE7DD; color: #14181E; }
 
 /* 分段控件 */
 .seg { display: flex; padding: 2px; border-radius: 8px; background: var(--well); box-shadow: inset 0 .5px 1px rgba(15, 28, 42, .08); }
@@ -265,6 +272,8 @@ a { color: var(--navy); }
 .mrow .udot { position: absolute; left: 2px; top: calc(var(--row-pad) + 14px); width: 7px; height: 7px; border-radius: 50%; background: var(--navy); }
 .mrow .tags { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
 .mrow .flag { color: var(--accent); }
+/* 按会话显示：名字后面的封数 */
+.mrow .tcount { flex: none; align-self: center; min-width: 18px; height: 16px; padding: 0 5px; border-radius: 8px; background: var(--well); color: var(--icon); font: 600 10.5px var(--mono); display: inline-flex; align-items: center; justify-content: center; }
 
 /* ---------- 阅读区 ---------- */
 .reader { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -275,6 +284,17 @@ a { color: var(--navy); }
 :root[data-serif="1"] .reader h2 { --serif-title: var(--serif); }
 .sender { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
 .sender .avatar { width: 32px; height: 32px; font-size: 12.5px; }
+/* 按会话显示：这一串里当前这封之外的邮件（折叠的一行 / 展开的正文），当前这封上下各有一条细线 */
+.th-item { display: flex; align-items: center; gap: 10px; width: 100%; margin-top: 8px; padding: 7px 10px; border: 0; border-radius: 10px; background: var(--sunken); box-shadow: inset 0 0 0 .5px var(--line); color: var(--ink-3); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
+.th-item:hover { background: var(--hover); }
+.th-item.unread .th-who { font-weight: 600; color: var(--ink); }
+.th-item .avatar { width: 24px; height: 24px; font-size: 10.5px; flex: none; }
+.th-item .th-who { flex: none; max-width: 40%; color: var(--ink-2); }
+.th-item .th-prev { flex: 1; min-width: 0; color: var(--sec); }
+.th-item .th-time { flex: none; margin-left: auto; font-size: 12px; color: var(--ter); }
+.th-open { margin-top: 8px; padding-bottom: 12px; }
+.th-active { margin-top: 12px; padding: 2px 0 14px; border-top: .5px solid var(--line); border-bottom: .5px solid var(--line); }
+.th-active:last-child { border-bottom: 0; padding-bottom: 0; }
 .att-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .att { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px 0 6px; border: 0; border-radius: 8px; background: var(--sunken); box-shadow: inset 0 0 0 .5px var(--line); font-size: 12.5px; cursor: pointer; color: var(--ink); }
 .att:hover { background: var(--hover); }
@@ -315,6 +335,7 @@ a { color: var(--navy); }
 
 /* ---------- 弹层 ---------- */
 .scrim { position: fixed; inset: 0; z-index: 50; background: rgba(15, 28, 42, .22); display: flex; align-items: flex-start; justify-content: center; padding: 64px 20px; animation: fadein .15s ease; }
+.scrim-drag { position: absolute; top: 0; left: 0; right: 0; height: 46px; }
 .sheet { width: 100%; max-width: 560px; border-radius: 12px; background: var(--paper); box-shadow: 0 0 0 .5px rgba(15, 28, 42, .28), 0 2px 6px rgba(15, 28, 42, .08), 0 30px 70px -20px rgba(15, 28, 42, .45); overflow: hidden; animation: popin .2s cubic-bezier(.2, .8, .3, 1); max-height: calc(100vh - 120px); display: flex; flex-direction: column; }
 .sheet.wide { max-width: 760px; }
 .sheet.narrow { max-width: 440px; }

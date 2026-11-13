@@ -2,10 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { ask } from '../lib/ask'
 import DOMPurify from 'dompurify'
 import { Icon } from '../icons'
-import { useApp } from '../store'
-import { api, errText, type MsgFull } from '../lib/api'
-import { addrText, fullTime, size } from '../lib/format'
-import { Avatar, Empty, Kojoo, Loader, useMenu } from '../ui'
+import { curRow, useApp } from '../store'
+import { api, errText, type MsgFull, type MsgLite } from '../lib/api'
+import { addrText, fullTime, shortTime, size } from '../lib/format'
+import { Avatar, Empty, Kojoo, Loader, TipText, useMenu } from '../ui'
 import { laterOptions, mailMenu } from './MailList'
 import { IS_MAC } from '../lib/platform'
 import { L, EN, catLabel } from '../lib/i18n'
@@ -14,7 +14,16 @@ export default function Reader() {
   const s = useApp()
   const m = s.open
   const menu = useMenu()
-  const idx = s.items.findIndex((x) => x.id === s.selected)
+  const idx = curRow(s)
+  // 按会话显示：这一串里当前这封之前、之后的邮件（只有一封时都是空的）
+  const at = m ? s.thread.findIndex((x) => x.id === m.id) : -1
+  const before = at >= 0 ? s.thread.slice(0, at) : []
+  const after = at >= 0 ? s.thread.slice(at + 1) : []
+  const inChain = at >= 0
+  const activeRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (inChain) activeRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [m?.id, inChain])
 
   if (!s.selected) {
     return (
@@ -55,17 +64,20 @@ export default function Reader() {
       </div>
       <div className="reader-scroll">
         <h2>{m.subject || L('（无主题）', '(no subject)')}</h2>
+        {before.map((x) => <ThreadItem key={x.id} x={x} />)}
+        <div ref={activeRef} className={inChain ? 'th-active' : undefined}>
         <div className="sender">
           <Avatar name={m.fromName} email={m.fromAddr} />
           <div style={{ fontSize: 13, lineHeight: 1.45, minWidth: 0, userSelect: 'text' }}>
             <b>{m.fromName || m.fromAddr}</b> {m.fromName && <span style={{ color: 'var(--ter)' }}>&lt;{m.fromAddr}&gt;</span>}
-            <div className="truncate" style={{ fontSize: 12, color: 'var(--ter)' }}>
+            <TipText className="truncate" style={{ fontSize: 12, color: 'var(--ter)' }}>
               {L('发给 ', 'To ')}{acc ? acc.label || acc.email : ''}{m.to.length > 0 && ` · ${m.to.map(addrText).join(L('，', ', '))}`}{m.cc.length > 0 && ` · ${L('抄送', 'Cc')} ${m.cc.map((a) => a.name || a.email).join(L('，', ', '))}`}
-            </div>
+            </TipText>
           </div>
           <span className="mono" style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--ter)', whiteSpace: 'nowrap' }}>{fullTime(m.date)}</span>
         </div>
 
+        {m.code && m.role !== 'sent' && m.role !== 'drafts' && <CodeNote code={m.code} />}
         {s.view.kind === 'followup' && m.role === 'sent' && !s.search && <FollowNote m={m} />}
         <AiCard m={m} />
 
@@ -88,9 +100,64 @@ export default function Reader() {
           </div>
         )}
         <MailBody m={m} key={m.id} />
+        </div>
+        {after.map((x) => <ThreadItem key={x.id} x={x} />)}
       </div>
       {menu.node}
     </section>
+  )
+}
+
+/** 会话里当前这封之外的邮件：读过的折叠成一行，没读的展开正文。点一下设为当前邮件（回复、删除等操作针对它） */
+function ThreadItem({ x }: { x: MsgLite }) {
+  const s = useApp()
+  const full = s.expanded[x.id]
+  const name = x.role === 'sent' ? L('我', 'Me') : x.fromName || x.fromAddr
+  const head = (
+    <>
+      <Avatar name={x.fromName} email={x.fromAddr} />
+      <span className="th-who truncate">{name}</span>
+      {!full && <span className="th-prev truncate">{x.aiSummary || x.snippet}</span>}
+      <span className="mono th-time">{shortTime(x.date)}</span>
+    </>
+  )
+  if (!full) return <button className={`th-item${!x.seen && x.role !== 'sent' ? ' unread' : ''}`} onClick={() => s.focusMsg(x.id)}>{head}</button>
+  return (
+    <div className="th-open">
+      <button className="th-item" title={L('设为当前邮件（回复、删除等操作针对它）', 'Make this the current email (reply, delete and other actions apply to it)')} onClick={() => s.focusMsg(x.id)}>{head}</button>
+      <MailBody m={full} key={full.id} />
+    </div>
+  )
+}
+
+/** 验证码邮件：把验证码单独列出来，点一下才复制（不自动写剪贴板） */
+function CodeNote({ code }: { code: string }) {
+  const s = useApp()
+  const copy = async () => {
+    let ok = false
+    try {
+      await navigator.clipboard.writeText(code)
+      ok = true
+    } catch {
+      // 剪贴板接口用不了时退回老办法
+      const t = document.createElement('textarea')
+      t.value = code
+      t.style.cssText = 'position:fixed;opacity:0'
+      document.body.appendChild(t)
+      t.select()
+      try { ok = document.execCommand('copy') } catch { ok = false }
+      t.remove()
+    }
+    if (ok) s.toast(L(`已复制验证码 ${code}`, `Copied code ${code}`), { ttl: 2500 })
+    else s.toast(L('没复制成功，请手动选中验证码复制', "Couldn't copy. Select the code and copy it manually."), { kind: 'err' })
+  }
+  return (
+    <div className="remote-note sq">
+      <Icon name="lock" size={15} />
+      <span>{L('验证码', 'Code')}</span>
+      <b className="mono" style={{ userSelect: 'text', color: 'var(--ink)', letterSpacing: 1 }}>{code}</b>
+      <button className="btn link sm" style={{ marginLeft: 'auto' }} onClick={copy}>{L('复制验证码', 'Copy code')}</button>
+    </div>
   )
 }
 
@@ -189,7 +256,7 @@ function AiCard({ m }: { m: MsgFull }) {
       <div className="ai-strip">
         {running ? <span style={{ color: '#F2A487', display: 'inline-flex' }}><Kojoo width={26} stroke={8} /></span> : <Icon name="sparkle" style={{ color: '#F2A487' }} />}
         <span className="t">{L('批注', 'AI notes')}</span>
-        <span className="s truncate">{running ? L('正在读这封邮件…', 'Reading this email…') : ai!.reason || ai!.summary}</span>
+        <TipText className="s truncate">{running ? L('正在读这封邮件…', 'Reading this email…') : ai!.reason || ai!.summary}</TipText>
         {!running && ai!.model && <span className="model">{ai!.model.replace(/^claude-/, '').replace(/-(\d)-(\d)$/, '-$1.$2')}</span>}
         {!running && <button className="tb" aria-label={collapsed ? L('展开批注', 'Expand AI notes') : L('收起批注', 'Collapse AI notes')} onClick={() => setCollapsed(!collapsed)}><Icon name={collapsed ? 'down' : 'up'} size={15} /></button>}
       </div>
@@ -202,7 +269,7 @@ function AiCard({ m }: { m: MsgFull }) {
           {ai!.facts.length > 0 && (
             <div className="facts">
               {ai!.facts.map((f, i) => (
-                <div key={i} className={`fact sq${/期望|截止|期限|due|deadline/i.test(f.k) ? ' hl' : ''}`}><div className="k">{f.k}</div><div className="v" title={f.v}>{f.v}</div></div>
+                <div key={i} className={`fact sq${/期望|截止|期限|due|deadline/i.test(f.k) ? ' hl' : ''}`}><div className="k">{f.k}</div><TipText className="v">{f.v}</TipText></div>
               ))}
             </div>
           )}
@@ -231,14 +298,14 @@ function AiCard({ m }: { m: MsgFull }) {
                   { label: L('友好亲切', 'Friendly'), run: () => draftWith('friendly') },
                   { label: L('简洁直接', 'Concise'), run: () => draftWith('brief') },
                 ])}>{L('换个语气', 'Change tone')}</button>
-                <button className="tb" aria-label={L('重新生成', 'Regenerate')} data-tip={L('用精细模型重新分析', 'Re-analyze with the detailed model')} onClick={regen}><Icon name="refresh" /></button>
+                <button className="tb" aria-label={L('重新生成', 'Regenerate')} data-tip={L('用精细模型重新分析', 'Re-analyze with the detailed model')} data-tip-pos="up" onClick={regen}><Icon name="refresh" /></button>
               </div>
             </>
           )}
           {!ai!.reply && (
             <div className="ai-actions" style={{ justifyContent: 'flex-end', paddingTop: 2 }}>
               <button className="btn sm sq" onClick={() => draftWith('pro')}>{L('让 AI 起草回复', 'Draft reply with AI')}</button>
-              <button className="tb" aria-label={L('重新生成', 'Regenerate')} data-tip={L('用精细模型重新分析', 'Re-analyze with the detailed model')} onClick={regen}><Icon name="refresh" /></button>
+              <button className="tb" aria-label={L('重新生成', 'Regenerate')} data-tip={L('用精细模型重新分析', 'Re-analyze with the detailed model')} data-tip-pos="up" onClick={regen}><Icon name="refresh" /></button>
             </div>
           )}
         </>

@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { ask } from '../lib/ask'
 import { Icon } from '../icons'
-import { useApp } from '../store'
+import { rowKey, useApp } from '../store'
 import { api, errText, FOCUS_CATS, type Draft, type Folder, type MsgLite } from '../lib/api'
 import { dayGroup, shortTime, who } from '../lib/format'
-import { Avatar, Empty, Kojoo, Seg, Sheet, useMenu, type MenuItem } from '../ui'
+import { Avatar, Empty, Kojoo, Seg, Sheet, TipText, useMenu, type MenuItem } from '../ui'
 import { folderName } from './Sidebar'
 import { catLabel, L, plural } from '../lib/i18n'
 
@@ -215,12 +215,16 @@ export default function MailList() {
             const acc = account(m.accountId)
             const p = showSender(m)
             const isChecked = s.checked.has(m.id)
+            // 按会话显示：这一行是一串会话（不止一封）时，显示参与的人、封数，未读 / 附件 / 重点按整串算
+            const th = m.thread && m.thread.count > 1 ? m.thread : null
+            const unreadRow = th ? th.unread > 0 : !m.seen && m.role !== 'sent'
+            const selRow = s.selected === m.id || (!!s.threadKey && rowKey(m) === s.threadKey)
             return (
               <Fragment key={m.id}>
                 {showG && <div className="group-h">{g}</div>}
                 <div
                   data-id={m.id}
-                  className={`mrow${s.selected === m.id ? ' sel' : ''}${!m.seen && m.role !== 'sent' ? ' unread' : ''}${isChecked ? ' checked' : ''}`}
+                  className={`mrow${selRow ? ' sel' : ''}${unreadRow ? ' unread' : ''}${isChecked ? ' checked' : ''}`}
                   onClick={(e) => {
                     if (e.ctrlKey || e.metaKey || e.shiftKey || s.checked.size) { s.toggleCheck(m.id); return }
                     s.select(m.id)
@@ -231,7 +235,7 @@ export default function MailList() {
                     menu.openAt(e.clientX, e.clientY, mailMenu(m, ids))
                   }}
                 >
-                  {!m.seen && m.role !== 'sent' && <span className="udot" />}
+                  {unreadRow && <span className="udot" />}
                   <span onClick={(e) => { e.stopPropagation(); s.toggleCheck(m.id) }} title={L('选择', 'Select')}>
                     {isChecked
                       ? <span className="avatar" style={{ background: 'var(--navy)', color: '#fff' }}><Icon name="check" size={18} /></span>
@@ -239,9 +243,10 @@ export default function MailList() {
                   </span>
                   <div style={{ minWidth: 0 }}>
                     <div className="row" style={{ alignItems: 'baseline', gap: 6 }}>
-                      <span className="who truncate">{m.role === 'sent' ? L(`致 ${p.name || p.email}`, `To ${p.name || p.email}`) : who(m)}</span>
-                      {m.hasAtt && <Icon name="clip" size={13} style={{ color: 'var(--ter)', alignSelf: 'center' }} />}
-                      {m.flagged && <Icon name="flag" size={13} className="flag" style={{ alignSelf: 'center' }} />}
+                      <span className="who truncate">{th ? th.who.join(L('、', ', ')) : m.role === 'sent' ? L(`致 ${p.name || p.email}`, `To ${p.name || p.email}`) : who(m)}</span>
+                      {th && <span className="tcount" title={L(`这个会话有 ${th.count} 封`, `${th.count} emails in this conversation`)}>{th.count}</span>}
+                      {(th ? th.hasAtt : m.hasAtt) && <Icon name="clip" size={13} style={{ color: 'var(--ter)', alignSelf: 'center' }} />}
+                      {(th ? th.flagged : m.flagged) && <Icon name="flag" size={13} className="flag" style={{ alignSelf: 'center' }} />}
                       <span className="time">{shortTime(m.date)}</span>
                     </div>
                     <div className="subj truncate">{m.subject || L('（无主题）', '(No subject)')}</div>
@@ -277,7 +282,7 @@ function AskCard() {
   if (!a) {
     return (
       <button className="ask-try" onClick={() => s.askAi(s.search)}>
-        <Icon name="sparkle" size={15} /><span className="grow truncate">{L(`让 AI 从邮件里找答案：「${s.search}」`, `Ask AI to answer from your emails: "${s.search}"`)}</span><Icon name="right" size={13} />
+        <Icon name="sparkle" size={15} /><TipText className="grow truncate">{L(`让 AI 从邮件里找答案：「${s.search}」`, `Ask AI to answer from your emails: "${s.search}"`)}</TipText><Icon name="right" size={13} />
       </button>
     )
   }

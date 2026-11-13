@@ -3,7 +3,7 @@ import { Icon } from '../icons'
 import { useApp } from '../store'
 import { api, errText, on, type Digest, type DigestItem, type Overview } from '../lib/api'
 import { dueLabel, shortTime } from '../lib/format'
-import { Kojoo, Loader } from '../ui'
+import { Kojoo, Loader, TipText } from '../ui'
 import { L, EN } from '../lib/i18n'
 
 const daysAgo = (t: number) => Math.max(1, Math.floor((Date.now() / 1000 - t) / 86400))
@@ -73,7 +73,7 @@ export default function DigestPage() {
             <div className="ai-strip">
               {ovBusy ? <span style={{ color: '#F2A487', display: 'inline-flex' }}><Kojoo width={26} stroke={8} /></span> : <Icon name="sparkle" style={{ color: '#F2A487' }} />}
               <span className="t">{L('今日概要', 'Overview')}</span>
-              <span className="s truncate">{ovBusy ? L('正在看今天的邮件…', "Reading today's mail…") : ov ? L(`${new Date(ov.at * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 生成`, `Generated at ${new Date(ov.at * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`) : ''}</span>
+              <TipText className="s truncate">{ovBusy ? L('正在看今天的邮件…', "Reading today's mail…") : ov ? L(`${new Date(ov.at * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 生成`, `Generated at ${new Date(ov.at * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`) : ''}</TipText>
             </div>
             <div className="dg-ov-body">
               {ovBusy && !ov ? (

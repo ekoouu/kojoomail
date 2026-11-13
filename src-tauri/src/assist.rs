@@ -539,5 +539,5 @@ pub async fn ai_followup(ctx: State<'_, Arc<Ctx>>, id: i64) -> Res<String> {
         text::sanitize_for_llm(&body)
     );
     let s = settings::load(&ctx);
-    ai::chat_text(&ctx, &[s.ai_model_fine.clone(), s.ai_model.clone(), s.ai_model_backup.clone()], FOLLOWUP_SYSTEM, &user, 800).await.map_err(e)
+    ai::chat_text(&ctx, &[s.ai_model_fine.clone(), s.ai_model.clone(), s.ai_model_backup.clone()], &ai::with_custom(FOLLOWUP_SYSTEM, &s.ai_custom), &user, 800).await.map_err(e)
 }

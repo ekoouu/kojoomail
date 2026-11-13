@@ -39,6 +39,8 @@ type S = {
   aiConfigured: boolean
   aiUsedToday: number
   version: string
+  /** 程序自己的完整路径（设置页 MCP 配置片段用） */
+  exePath: string
   /** 这个版本能用的一键登录 */
   oauth: string[]
   page: Page
@@ -61,6 +63,12 @@ type S = {
   /** 「移动到…」选择框：要移动的邮件（同一个账号） */
   movePick: { ids: number[]; accountId: number } | null
   open: MsgFull | null
+  /** 按会话显示：正在看的这一串（按时间从早到晚；只有一封时为空） */
+  thread: MsgLite[]
+  /** 这一串里除了当前这封之外展开着的邮件 */
+  expanded: Record<number, MsgFull>
+  /** 正在看的会话（账号:会话编号）：列表里据此高亮那一行 */
+  threadKey: string | null
   openLoading: boolean
   openError: string
   compose: Compose | null
@@ -80,6 +88,10 @@ type S = {
   loadMore: () => Promise<void>
   select: (id: number | null) => Promise<void>
   reloadOpen: () => Promise<void>
+  /** 取当前这封所在的整串会话；auto：顺便把没读的展开并标为已读（刚点开时） */
+  loadThread: (auto: boolean) => Promise<void>
+  /** 会话里点另一封：把它设为当前邮件（回复、删除等操作针对它） */
+  focusMsg: (id: number) => Promise<void>
   toggleCheck: (id: number) => void
   mark: (ids: number[], p: { seen?: boolean; flagged?: boolean }) => Promise<void>
   /** 一键已读：当前列表（视图、账号、页签、搜索）里的未读全部标为已读，可撤销 */
@@ -105,9 +117,18 @@ type S = {
   saveSettings: (p: Partial<Settings>) => Promise<void>
 }
 
-const queryFor = (s: Pick<S, 'view' | 'filter' | 'search'>, offset: number, limit: number) => {
+const NO_THREAD = { thread: [] as MsgLite[], expanded: {} as Record<number, MsgFull>, threadKey: null as string | null }
+/** 现在的列表是不是按会话显示（搜索结果和重点、稍后处理等视图仍按单封） */
+const threadsOn = (s: Pick<S, 'settings' | 'view' | 'search'>) => !!s.settings?.conversationView && !s.search && (s.view.kind === 'all' || s.view.kind === 'folder' || s.view.kind === 'sent')
+export const rowKey = (m: MsgLite) => (m.thread ? `${m.accountId}:${m.thread.id}` : null)
+/** 当前邮件在列表里是第几行（按会话显示时，当前邮件可能是那一行会话里较早的一封） */
+export const curRow = (s: Pick<S, 'items' | 'selected' | 'threadKey'>) => s.items.findIndex((m) => m.id === s.selected || (!!s.threadKey && rowKey(m) === s.threadKey))
+const unreadIn = (list: MsgLite[]) => list.filter((x) => !x.seen && x.role !== 'sent' && x.role !== 'drafts').length
+
+const queryFor = (s: Pick<S, 'view' | 'filter' | 'search' | 'settings'>, offset: number, limit: number) => {
   const v = s.view
   return {
+    threads: !!s.settings?.conversationView,
     view: (v.kind === 'drafts' ? 'all' : v.kind === 'folder' ? 'folder' : v.kind) as 'all' | 'important' | 'later' | 'bills' | 'followup' | 'sent' | 'folder',
     accountId: v.kind === 'all' ? v.accountId ?? null : v.kind === 'folder' ? v.accountId : null,
     folderId: v.kind === 'folder' ? v.folderId : null,
@@ -159,6 +180,7 @@ export const useApp = create<S>((set, get) => ({
   aiConfigured: false,
   aiUsedToday: 0,
   version: '',
+  exePath: '',
   oauth: [],
   page: 'mail',
   settingsTab: 'general',
@@ -176,6 +198,7 @@ export const useApp = create<S>((set, get) => ({
   checked: new Set(),
   movePick: null,
   open: null,
+  ...NO_THREAD,
   openLoading: false,
   openError: '',
   compose: null,
@@ -192,7 +215,7 @@ export const useApp = create<S>((set, get) => ({
     if (syncLang(b.lang)) return
     const status: Record<number, Status> = {}
     for (const s of b.status) status[s.accountId] = s
-    set({ accounts: b.accounts, folders: b.folders, settings: b.settings, status, counts: b.counts, aiConfigured: b.aiConfigured, aiUsedToday: b.aiUsedToday, version: b.version, oauth: b.oauth, ready: true })
+    set({ accounts: b.accounts, folders: b.folders, settings: b.settings, status, counts: b.counts, aiConfigured: b.aiConfigured, aiUsedToday: b.aiUsedToday, version: b.version, exePath: b.exePath ?? '', oauth: b.oauth, ready: true })
     if (b.accounts.length) await get().loadList()
   },
 
@@ -204,20 +227,20 @@ export const useApp = create<S>((set, get) => ({
   },
 
   go: (v) => {
-    set({ pinned: null, page: 'mail', view: v, filter: 'all', cats: [], search: '', selected: null, open: null, checked: new Set(), items: [], loading: true })
+    set({ pinned: null, page: 'mail', view: v, filter: 'all', cats: [], search: '', selected: null, open: null, ...NO_THREAD, checked: new Set(), items: [], loading: true })
     if (v.kind === 'folder') api.openFolder(v.folderId).catch(() => {})
     if (v.kind !== 'drafts') get().loadList()
     else set({ loading: false })
   },
 
   setFilter: (f) => {
-    set({ pinned: null, filter: f, selected: null, open: null, checked: new Set(), items: [], loading: true })
+    set({ pinned: null, filter: f, selected: null, open: null, ...NO_THREAD, checked: new Set(), items: [], loading: true })
     get().loadList()
   },
 
   doSearch: (q) => {
     const t = q.trim()
-    set({ pinned: null, page: 'mail', search: t, ask: null, selected: null, open: null, checked: new Set(), items: [], loading: true })
+    set({ pinned: null, page: 'mail', search: t, ask: null, selected: null, open: null, ...NO_THREAD, checked: new Set(), items: [], loading: true })
     get().loadList()
     // 像是在提问（问号结尾、疑问词开头）就直接问 AI，结果显示在搜索结果上方
     if (t && get().aiConfigured && isQuestion(t)) get().askAi(t)
@@ -236,7 +259,7 @@ export const useApp = create<S>((set, get) => ({
   openMsg: async (id, view) => {
     // 指定了视图（待跟进、账单发票）就切过去；否则留在原地（问邮箱的答案、搜索结果都还在），信不在列表里也照样打开
     if (view) {
-      set({ page: 'mail', view, filter: 'all', cats: [], search: '', ask: null, checked: new Set() })
+      set({ page: 'mail', view, filter: 'all', cats: [], search: '', ask: null, ...NO_THREAD, checked: new Set() })
       await get().loadList()
     } else if (get().page !== 'mail') {
       set({ page: 'mail' })
@@ -269,7 +292,11 @@ export const useApp = create<S>((set, get) => ({
       get().loadCats()
       // 选中的邮件被移走了：自动选下一封
       const sel = get().selected
-      if (sel && sel !== get().pinned && !r.items.some((m) => m.id === sel)) set({ selected: null, open: null })
+      // 按会话显示时，正在看的可能是那一行里较早的一封：那一串还在列表里就不关，顺便把串更新一下（来了新回复）
+      const tk = get().threadKey
+      const rowStill = !!tk && r.items.some((m) => rowKey(m) === tk)
+      if (sel && sel !== get().pinned && !r.items.some((m) => m.id === sel) && !rowStill) set({ selected: null, open: null, ...NO_THREAD })
+      else if (sel && tk) get().loadThread(false)
     } catch (e) {
       get().toast(errText(e), { kind: 'err' })
     } finally {
@@ -293,7 +320,8 @@ export const useApp = create<S>((set, get) => ({
   },
 
   select: async (id) => {
-    set({ selected: id, openError: '', ...(id !== get().pinned ? { pinned: null } : {}) })
+    // 换到同一串会话里的另一封时，串留着；其余情况先清掉
+    set({ selected: id, openError: '', ...(id !== get().pinned ? { pinned: null } : {}), ...(id != null && get().thread.some((x) => x.id === id) ? {} : NO_THREAD) })
     if (id == null) { set({ open: null }); return }
     openedSince.add(id)
     const lite = get().items.find((m) => m.id === id)
@@ -305,6 +333,7 @@ export const useApp = create<S>((set, get) => ({
       // 不在列表里的（从简报、问邮箱打开）按完整邮件判断
       const st = lite ?? full
       if (!st.seen && st.role !== 'drafts') get().mark([id], { seen: true })
+      if (threadsOn(get()) && id !== get().pinned) await get().loadThread(true)
     } catch (e) {
       if (get().selected === id) set({ openError: errText(e) })
     } finally {
@@ -319,6 +348,46 @@ export const useApp = create<S>((set, get) => ({
       const full = await api.get(id)
       if (get().selected === id) set({ open: full })
     } catch { /* ignore */ }
+  },
+
+  loadThread: async (auto) => {
+    const id = get().selected
+    if (!id) return
+    try {
+      const r = await api.thread(id)
+      if (get().selected !== id) return
+      const key = r.id ? `${r.accountId}:${r.id}` : null
+      if (r.items.length <= 1) { set({ thread: [], expanded: {}, threadKey: key }); return }
+      const inChain = new Set(r.items.map((x) => x.id))
+      set({ thread: r.items, threadKey: key, expanded: Object.fromEntries(Object.entries(get().expanded).filter(([k]) => inChain.has(Number(k)))) })
+      if (!auto) return
+      // 刚点开：串里没读过的也展开（最多最近 10 封，免得一下子下载太多正文），展开了就算读过
+      const fresh = r.items.filter((x) => x.id !== id && !x.seen && x.role !== 'sent' && x.role !== 'drafts').slice(-10)
+      const shown: number[] = []
+      for (const x of fresh) {
+        try {
+          const full = await api.get(x.id)
+          if (get().selected !== id) break
+          set({ expanded: { ...get().expanded, [x.id]: full } })
+          shown.push(x.id)
+        } catch { /* 这封取不到正文就先折叠着 */ }
+      }
+      if (shown.length) {
+        shown.forEach((x) => openedSince.add(x))
+        get().mark(shown, { seen: true })
+      }
+    } catch { /* 取不到整串就按单封显示 */ }
+  },
+
+  focusMsg: async (id) => {
+    let full = get().expanded[id]
+    if (!full) {
+      try { full = await api.get(id) } catch (e) { get().toast(errText(e), { kind: 'err' }); return }
+    }
+    if (!get().thread.some((x) => x.id === id)) return // 期间换了别的邮件
+    set({ selected: id, open: full, openError: '' })
+    openedSince.add(id)
+    if (!full.seen && full.role !== 'drafts') get().mark([id], { seen: true })
   },
 
   toggleCheck: (id) => {
@@ -344,9 +413,17 @@ export const useApp = create<S>((set, get) => ({
     if (!ids.length) return
     const hit = new Set(ids)
     // 先改界面
+    const upd = <T extends MsgLite>(m: T): T => (hit.has(m.id) ? { ...m, ...(p.seen != null ? { seen: p.seen } : {}), ...(p.flagged != null ? { flagged: p.flagged } : {}) } : m)
+    // 按会话显示：正在看的这一串里的邮件、列表里那一行的未读数也跟着改
+    const thread = get().thread.map(upd)
+    const tk = thread.length && p.seen != null ? get().threadKey : null
     set({
-      items: get().items.map((m) => (hit.has(m.id) ? { ...m, ...(p.seen != null ? { seen: p.seen } : {}), ...(p.flagged != null ? { flagged: p.flagged } : {}) } : m)),
-      open: get().open && hit.has(get().open!.id) ? { ...get().open!, ...(p.seen != null ? { seen: p.seen } : {}), ...(p.flagged != null ? { flagged: p.flagged } : {}) } : get().open,
+      items: get().items.map((m) => {
+        const x = upd(m)
+        return tk && x.thread && rowKey(x) === tk ? { ...x, thread: { ...x.thread, unread: unreadIn(thread) } } : x
+      }),
+      open: get().open ? upd(get().open!) : get().open,
+      ...(thread.length ? { thread, expanded: Object.fromEntries(Object.entries(get().expanded).map(([k, v]) => [k, upd(v)])) } : {}),
     })
     try {
       await api.mark(ids, p) // 后端会发 mail-changed，计数随之刷新
@@ -363,10 +440,14 @@ export const useApp = create<S>((set, get) => ({
       if (await ask(L(`彻底删除这 ${picked.length} 封邮件？删除后不能恢复。`, `Permanently delete ${picked.length === 1 ? 'this email' : `these ${picked.length} emails`}? This can't be undone.`))) await get().removeForever(ids)
       return
     }
-    const idx = s.selected ? s.items.findIndex((m) => m.id === s.selected) : -1
+    const idx = s.selected ? curRow(s) : -1
     const rest = s.items.filter((m) => !ids.includes(m.id))
     let next: number | null = s.selected
-    if (s.selected && ids.includes(s.selected)) next = rest[Math.min(idx, rest.length - 1)]?.id ?? null
+    if (s.selected && ids.includes(s.selected)) {
+      // 按会话显示：这一串里还有别的邮件就留在这一串，看剩下的最新一封
+      const remain = s.thread.filter((x) => !ids.includes(x.id))
+      next = remain.length ? remain[remain.length - 1].id : rest[Math.min(idx, rest.length - 1)]?.id ?? null
+    }
     set({ items: rest, total: Math.max(0, s.total - picked.length), checked: new Set() })
     if (next !== s.selected) get().select(next)
     try {
@@ -377,6 +458,8 @@ export const useApp = create<S>((set, get) => ({
         ttl: (get().settings?.undoSendSecs || 5) * 1000,
       })
       get().refreshMeta()
+      // 按会话显示：那一行的封数、代表的那一封可能变了
+      if (get().settings?.conversationView) get().loadList(true)
     } catch (e) {
       get().toast(errText(e), { kind: 'err' })
       get().loadList(true)
@@ -385,9 +468,10 @@ export const useApp = create<S>((set, get) => ({
 
   removeForever: async (ids) => {
     set({ items: get().items.filter((m) => !ids.includes(m.id)), checked: new Set() })
-    if (get().selected && ids.includes(get().selected!)) set({ selected: null, open: null })
+    if (get().selected && ids.includes(get().selected!)) set({ selected: null, open: null, ...NO_THREAD })
     try {
       await api.deleteForever(ids)
+      if (get().settings?.conversationView) get().loadList(true)
       get().toast(L(`已彻底删除 ${ids.length} 封邮件`, ids.length === 1 ? 'Email permanently deleted' : `${ids.length} emails permanently deleted`))
     } catch (e) {
       get().toast(errText(e), { kind: 'err' })
@@ -398,7 +482,7 @@ export const useApp = create<S>((set, get) => ({
     await api.snooze(ids, until)
     if (until) {
       set({ items: get().items.filter((m) => !ids.includes(m.id) || get().view.kind === 'later') })
-      if (get().selected && ids.includes(get().selected!) && get().view.kind !== 'later') set({ selected: null, open: null })
+      if (get().selected && ids.includes(get().selected!) && get().view.kind !== 'later') set({ selected: null, open: null, ...NO_THREAD })
       get().toast(L('已放到「稍后处理」', 'Snoozed'))
     }
     get().refreshMeta()
@@ -433,6 +517,11 @@ export const useApp = create<S>((set, get) => ({
     try {
       const saved = await api.saveSettings(next)
       set({ settings: saved })
+      // 开关「按会话显示」：列表重新取一遍
+      if (p.conversationView !== undefined && p.conversationView !== cur.conversationView) {
+        set({ selected: null, open: null, checked: new Set(), ...NO_THREAD })
+        get().loadList()
+      }
       // 保存期间可能打开了写信窗口或点了发送：那就先不重新加载，下次启动生效
       if (p.language !== undefined) {
         const lang = await api.uiLang()

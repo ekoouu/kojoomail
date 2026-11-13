@@ -4,7 +4,7 @@ import React, { useEffect, useRef } from 'react'
 import ReactDOM from 'react-dom/client'
 import './styles.css'
 import { api, on, type Status } from './lib/api'
-import { useApp } from './store'
+import { curRow, useApp } from './store'
 import { Loader, Toasts, isTyping } from './ui'
 import { IS_MAC } from './lib/platform'
 import TitleBar from './views/TitleBar'
@@ -99,7 +99,7 @@ function useShortcuts(searchRef: React.RefObject<HTMLInputElement>) {
       }
       if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey || s.compose || s.addAccount || s.repairAccount || s.movePick || s.guide || document.querySelector('.menu')) return
       if (!s.accounts.length) return
-      const idx = s.items.findIndex((m) => m.id === s.selected)
+      const idx = curRow(s)
       const cur = s.open
       const targets = s.checked.size ? [...s.checked] : s.selected ? [s.selected] : []
       switch (e.key) {

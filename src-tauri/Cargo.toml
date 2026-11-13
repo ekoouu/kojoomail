@@ -1,6 +1,6 @@
 [package]
 name = "kojoomail"
-version = "0.3.1"
+version = "0.3.2"
 description = "Kojoo Mail - 多邮箱 + AI 的桌面邮件客户端"
 authors = ["Eko"]
 license = "AGPL-3.0-or-later"

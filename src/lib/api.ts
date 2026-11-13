@@ -27,15 +27,25 @@ export type Settings = {
   autostart: boolean; closeToTray: boolean; defaultAccount: number | null; notify: 'important' | 'all' | 'none'
   remoteImages: 'ask' | 'always'; undoSendSecs: number
   notifyPreview: boolean; aiProvider: string; aiBase: string; aiModel: string; aiModelFine: string; aiModelBackup: string; aiAuto: boolean; aiScope: 'skip_bulk' | 'all' | 'important'; aiDailyLimit: number
+  /** 自定义要求：追加到批注、起草回复、跟进邮件的提示词末尾 */
+  aiCustom: string
   language: 'auto' | 'zh' | 'en'
+  /** 按会话显示：同一来回的邮件在列表里合成一行 */
+  conversationView: boolean
+  /** 代理：跟随系统 / 不用 / 自定义地址（HTTP 代理，主机:端口） */
+  proxyMode: 'system' | 'off' | 'custom'; proxyAddr: string
+  /** 允许外部 AI Agent 通过 MCP 只读本机邮件（默认关） */
+  mcpRead: boolean
 }
 export type Counts = { inboxUnread: number; important: number; todos: number; later: number; drafts: number; bills: number; followups: number }
 export type CatCount = { cat: string; total: number; unread: number }
-export type Boot = { accounts: Account[]; folders: Folder[]; settings: Settings; status: Status[]; aiConfigured: boolean; aiUsedToday: number; counts: Counts; version: string; oauth: string[]; lang: 'zh' | 'en' }
+export type Boot = { accounts: Account[]; folders: Folder[]; settings: Settings; status: Status[]; aiConfigured: boolean; aiUsedToday: number; counts: Counts; version: string; oauth: string[]; lang: 'zh' | 'en'; exePath?: string }
 export type MsgLite = {
   id: number; accountId: number; folderId: number; role: string; fromName: string; fromAddr: string; to: Addr[]; subject: string; snippet: string
   date: number; seen: boolean; flagged: boolean; answered: boolean; hasAtt: boolean; bulk: boolean
   aiCategory: string; aiPriority: string; aiSummary: string; openTodos: number; later: number | null
+  /** 按会话显示时：这一行代表的整串会话（count 是封数，who 是参与的人） */
+  thread?: { id: number; count: number; unread: number; who: string[]; hasAtt: boolean; flagged: boolean }
 }
 export type Fact = { k: string; v: string }
 export type AiResult = { state: number; summary: string; category: string; priority: string; reason: string; facts: Fact[]; reply: string; replyLang: string; model: string; error: string }
@@ -44,9 +54,9 @@ export type Todo = {
   source: string; srcSubject: string; srcFrom: string; created: number
 }
 export type Att = { idx: number; name: string; size: number; mime: string; inline: boolean }
-export type MsgFull = MsgLite & { cc: Addr[]; replyTo: string; msgid: string; refs: string; inReplyTo: string; text: string; html: string; atts: Att[]; ai: AiResult | null; aiPending: boolean; todos: Todo[] }
+export type MsgFull = MsgLite & { cc: Addr[]; replyTo: string; msgid: string; refs: string; inReplyTo: string; text: string; html: string; atts: Att[]; ai: AiResult | null; aiPending: boolean; todos: Todo[]; code: string }
 export type Draft = { id: number; accountId: number | null; to: Addr[]; cc: Addr[]; bcc: Addr[]; subject: string; body: string; replyMsg: number | null; mode: string; updated: number; attachments: string[] }
-export type ListQuery = { view: 'all' | 'important' | 'later' | 'bills' | 'followup' | 'sent' | 'folder'; accountId?: number | null; folderId?: number | null; filter?: string; search?: string; maxId?: number | null; offset: number; limit: number }
+export type ListQuery = { view: 'all' | 'important' | 'later' | 'bills' | 'followup' | 'sent' | 'folder'; accountId?: number | null; folderId?: number | null; filter?: string; search?: string; maxId?: number | null; threads?: boolean; offset: number; limit: number }
 export type DigestItem = { id: number; accountId: number; who: string; subject: string; summary: string; date: number; seen: boolean; high: boolean }
 export type DigestTodo = { id: number; msgId: number | null; text: string; due: number | null }
 export type Digest = { reply: DigestItem[]; bills: DigestItem[]; todos: DigestTodo[]; followups: DigestItem[]; followupTotal: number; bulkUnread: number; newCount: number }
@@ -59,6 +69,9 @@ export type AccountIn = {
   oauthTicket?: string
 }
 export type DraftIn = { id?: number | null; accountId: number; to: Addr[]; cc: Addr[]; bcc: Addr[]; subject: string; body: string; html: string; replyMsg?: number | null; mode: string; attachments: string[] }
+export type RuleCond = { field: 'from' | 'to' | 'subject' | 'attachment'; op: 'contains' | 'not_contains' | 'equals' | 'has' | 'none'; value: string }
+export type RuleAction = { kind: 'move' | 'archive' | 'junk' | 'read' | 'unread' | 'flag' | 'unflag'; folder: string }
+export type Rule = { id: number; name: string; enabled: boolean; accountId: number | null; matchAll: boolean; conds: RuleCond[]; actions: RuleAction[]; stop: boolean }
 
 const call = <T,>(cmd: string, args?: Record<string, unknown>) => invoke<T>(cmd, args)
 
@@ -78,6 +91,8 @@ export const api = {
   followupSet: (id: number, off: boolean) => call<void>('followup_set', { id, off }),
   aiFollowup: (id: number) => call<string>('ai_followup', { id }),
   get: (id: number) => call<MsgFull>('get_message', { id }),
+  /** 这封邮件所在的整串会话（按时间从早到晚） */
+  thread: (id: number) => call<{ id: number; accountId: number; items: MsgLite[] }>('thread_messages', { id }),
   mark: (ids: number[], p: { seen?: boolean; flagged?: boolean }) => call<void>('mark', { ids, seen: p.seen ?? null, flagged: p.flagged ?? null }),
   snooze: (ids: number[], until: number | null) => call<void>('snooze', { ids, until }),
   move: (ids: number[], target: string) => call<number>('move_to', { ids, target }),
@@ -85,6 +100,10 @@ export const api = {
   deleteForever: (ids: number[]) => call<void>('delete_forever', { ids }),
   openFolder: (folderId: number) => call<void>('open_folder', { folderId }),
   syncNow: () => call<void>('sync_now'),
+  rules: () => call<Rule[]>('rule_list'),
+  ruleSave: (rule: Rule) => call<number>('rule_save', { rule }),
+  ruleDelete: (id: number) => call<void>('rule_delete', { id }),
+  ruleOrder: (ids: number[]) => call<void>('rule_order', { ids }),
   testAccount: (input: AccountIn) => call<void>('test_account', { input }),
   addAccount: (input: AccountIn) => call<number>('add_account', { input }),
   updateAccount: (id: number, patch: Partial<{ displayName: string; label: string; color: string; signature: string; aiAllowed: boolean; password: string; oauthTicket: string; focus: string[]; aiLevel: 'full' | 'classify' }>) => call<void>('update_account', { id, patch }),

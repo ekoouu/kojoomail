@@ -12,15 +12,18 @@ mod commands;
 mod graph;
 mod i18n;
 mod mailbox;
+mod mcp;
 mod mime;
 mod net;
 mod oauth;
 mod os;
+mod rules;
 mod secret;
 mod settings;
 mod smtp;
 mod store;
 mod text;
+mod thread;
 mod update;
 
 use std::collections::HashMap;
@@ -39,10 +42,27 @@ pub struct Ctx {
     pub newmail_tx: mpsc::UnboundedSender<Vec<i64>>,
     /// 等 AI 结果再提醒的新邮件：id → 加入时间
     pub pending_notify: Mutex<HashMap<i64, i64>>,
+    /// 等正文到了再提醒的验证码邮件（好把验证码放进通知）
+    pub code_wait: Mutex<std::collections::HashSet<i64>>,
     pub pending_moves: Mutex<HashMap<u64, Vec<i64>>>,
     pub next_token: Mutex<u64>,
     pub settings_cache: Mutex<Option<settings::Settings>>,
     pub http: reqwest::Client,
+}
+
+/// 马上提醒；主题像验证码邮件、正文还没取的先等正文（预取完由 mailbox 调 `ai::code_ready`），
+/// 最多等 15 秒（一次性的，不是轮询）：正文没取到也照常提醒，只是通知里没有验证码
+fn notify_now_or_code(ctx: &Arc<Ctx>, id: i64) {
+    if !ai::wait_code(ctx, id) {
+        ai::notify_msg(ctx, id, None);
+        return;
+    }
+    ctx.code_wait.lock().unwrap().insert(id);
+    let c = ctx.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        ai::code_ready(&c, id);
+    });
 }
 
 #[cfg(windows)]
@@ -119,6 +139,11 @@ fn data_dir() -> std::path::PathBuf {
 }
 
 pub fn run() {
+    // 只读 MCP：不开窗口、不连邮箱、不写日志、不做单实例检查（必须在 applog::init 和建 Builder 之前）
+    if std::env::args().any(|a| a == "--mcp") {
+        i18n::apply("auto");
+        std::process::exit(mcp::run(&data_dir()));
+    }
     // 读到设置之前先按系统语言：启动失败的弹窗也能看懂；读到设置后按用户选的
     i18n::apply("auto");
     applog::init(&data_dir());
@@ -155,6 +180,7 @@ pub fn run() {
                 ai_tx,
                 newmail_tx: nm_tx,
                 pending_notify: Mutex::new(HashMap::new()),
+                code_wait: Mutex::new(std::collections::HashSet::new()),
                 pending_moves: Mutex::new(HashMap::new()),
                 next_token: Mutex::new(0),
                 settings_cache: Mutex::new(None),
@@ -162,6 +188,8 @@ pub fn run() {
             });
             app.manage(ctx.clone());
             settings::keep_legacy_ai(&ctx);
+            // 先把设置读进来（代理模式要在收信线程开始连接前生效）
+            settings::load(&ctx);
             ai::spawn(ctx.clone(), ai_rx);
             update::spawn(app.handle().clone());
 
@@ -190,7 +218,7 @@ pub fn run() {
                         // 广告、通知、订阅：当场本地分类，只有「全部提醒」才弹
                         if ai::apply_local(&c2, id).is_some() {
                             if mode == "all" {
-                                ai::notify_msg(&c2, id, None);
+                                notify_now_or_code(&c2, id);
                             }
                             continue;
                         }
@@ -200,7 +228,7 @@ pub fn run() {
                         } else {
                             let bulk: bool = c2.store.lock().unwrap().conn.query_row("SELECT bulk FROM messages WHERE id=?", [id], |r| r.get(0)).unwrap_or(true);
                             if mode == "all" || !bulk {
-                                ai::notify_msg(&c2, id, None);
+                                notify_now_or_code(&c2, id);
                             }
                         }
                     }
@@ -350,6 +378,7 @@ pub fn run() {
             commands::get_folders,
             commands::list_messages,
             commands::get_message,
+            commands::thread_messages,
             commands::mark,
             commands::snooze,
             commands::move_to,
@@ -381,6 +410,10 @@ pub fn run() {
             commands::ai_draft,
             commands::ai_rewrite,
             commands::ai_translate,
+            rules::rule_list,
+            rules::rule_save,
+            rules::rule_delete,
+            rules::rule_order,
             commands::save_settings,
             commands::set_ai_key,
             commands::ai_test,

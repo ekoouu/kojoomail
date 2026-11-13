@@ -1,9 +1,57 @@
 //! 连邮件服务器：系统设置了代理（比如 Clash 的 127.0.0.1:7890）就走代理的 HTTP CONNECT 隧道，否则直连。
 //! 国内访问 Gmail 要靠代理；代理软件按规则分流，国内邮箱照样直连。代理没开（连不上）时退回直连。
+//! 设置里可改成不用代理，或自定义代理地址（自定义时代理连不上直接报错，不退回直连）。
 
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+/// 代理模式：跟随系统 / 不用代理 / 自定义 HTTP 代理（主机:端口）
+#[derive(Clone, PartialEq, Debug)]
+enum Mode {
+    System,
+    Off,
+    Custom(String),
+}
+
+static MODE: std::sync::RwLock<Mode> = std::sync::RwLock::new(Mode::System);
+
+/// 用户填的代理地址整理成 主机:端口；不是 HTTP 代理或格式不对返回 None
+pub fn clean_addr(v: &str) -> Option<String> {
+    let v = v.trim();
+    let v = v.strip_prefix("http://").unwrap_or(v).trim_end_matches('/');
+    if v.contains("://") {
+        return None;
+    }
+    let (host, port) = v.rsplit_once(':')?;
+    let port: u16 = port.parse().ok().filter(|p| *p > 0)?;
+    (!host.is_empty() && !host.chars().any(char::is_whitespace)).then(|| format!("{host}:{port}"))
+}
+
+/// 按设置切换代理模式（读设置、存设置时调用）
+pub fn configure(mode: &str, addr: &str) {
+    let m = match mode {
+        "off" => Mode::Off,
+        "custom" => match clean_addr(addr) {
+            Some(a) => Mode::Custom(a),
+            None => Mode::System,
+        },
+        _ => Mode::System,
+    };
+    *MODE.write().unwrap() = m;
+}
+
+/// 这次连接走哪个代理：返回（代理地址, 是否严格——连不上就报错、不退回直连）
+fn pick(mode: &Mode, sys: impl FnOnce() -> Option<(String, Vec<String>)>, host: &str) -> Option<(String, bool)> {
+    match mode {
+        Mode::Off => None,
+        Mode::Custom(a) => {
+            let local: Vec<String> = ["<local>", "localhost", "127.*"].iter().map(|s| s.to_string()).collect();
+            (!bypassed(host, &local)).then(|| (a.clone(), true))
+        }
+        Mode::System => sys().filter(|(_, b)| !bypassed(host, b)).map(|(p, _)| (p, false)),
+    }
+}
 
 /// 系统代理地址和不走代理的名单（Windows「设置 → 网络 → 代理」，读注册表）
 #[cfg(windows)]
@@ -97,19 +145,34 @@ fn bypassed(host: &str, list: &[String]) -> bool {
 
 /// 连上 host:port，返回可以直接在上面跑 TLS 的 TCP 连接，以及是不是真的经过了代理
 pub async fn dial(host: &str, port: u16) -> Result<(TcpStream, bool), String> {
-    if let Some((proxy, _)) = system_proxy().filter(|(_, b)| !bypassed(host, b)) {
+    let mode = MODE.read().unwrap().clone();
+    dial_by(pick(&mode, system_proxy, host), host, port).await
+}
+
+/// via：（代理地址, 是否严格）。严格时代理连不上或拒绝都直接报错，不退回直连
+async fn dial_by(via: Option<(String, bool)>, host: &str, port: u16) -> Result<(TcpStream, bool), String> {
+    if let Some((proxy, strict)) = via {
         if let Ok(Ok(s)) = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(proxy.as_str())).await {
             let first = match tokio::time::timeout(Duration::from_secs(20), tunnel(s, host, port)).await {
                 Ok(Ok(s)) => return Ok((s, true)),
                 Ok(Err(e)) => tr!("经代理 {proxy} 连 {host}:{port} 失败：{e}", "Connecting to {host}:{port} through proxy {proxy} failed: {e}"),
                 Err(_) => return Err(tr!("经代理 {proxy} 连 {host}:{port} 超时", "Connecting to {host}:{port} through proxy {proxy} timed out")),
             };
+            if strict {
+                return Err(first);
+            }
             // 代理明确拒绝（公司代理常只放行 443 端口）：直连再试一次，两个原因都报出来
             crate::applog::info(&format!("{first}，改直连"));
             return match dial_direct(host, port).await {
                 Ok(s) => Ok((s, false)),
                 Err(e) => Err(tr!("{first}；改直连也失败：{e}", "{first}; a direct connection also failed: {e}")),
             };
+        }
+        if strict {
+            return Err(tr!(
+                "连不上自定义代理 {proxy}，请确认代理软件开着、地址没填错（设置 → 通用 → 代理）",
+                "Can't reach the custom proxy {proxy}. Check that your proxy app is running and the address is right (Settings → General → Proxy)"
+            ));
         }
         // 代理没开：直连
     }
@@ -191,6 +254,38 @@ mod tests {
         assert!(bypassed("169.254.3.4", &m));
         assert!(!bypassed("10.0.0.1", &m));
         assert!(!bypassed("mail.example.com", &m));
+    }
+
+    #[test]
+    fn proxy_modes() {
+        let sys = || Some(("1.2.3.4:7890".to_string(), vec!["*.corp.cn".to_string()]));
+        assert_eq!(pick(&Mode::System, sys, "imap.gmail.com"), Some(("1.2.3.4:7890".to_string(), false)));
+        assert_eq!(pick(&Mode::System, sys, "mail.corp.cn"), None);
+        assert_eq!(pick(&Mode::Off, || panic!("不该读系统代理"), "imap.gmail.com"), None);
+        let c = Mode::Custom("127.0.0.1:7890".into());
+        assert_eq!(pick(&c, || panic!("不该读系统代理"), "imap.gmail.com"), Some(("127.0.0.1:7890".to_string(), true)));
+        assert_eq!(pick(&c, || panic!("不该读系统代理"), "127.0.0.1"), None);
+        assert_eq!(pick(&c, || panic!("不该读系统代理"), "localhost"), None);
+    }
+
+    #[test]
+    fn clean_addr_formats() {
+        assert_eq!(clean_addr("127.0.0.1:7890").as_deref(), Some("127.0.0.1:7890"));
+        assert_eq!(clean_addr(" http://proxy.lan:8080/ ").as_deref(), Some("proxy.lan:8080"));
+        for bad in ["socks5://127.0.0.1:1080", "127.0.0.1", ":7890", "a:0", "a:99999"] {
+            assert_eq!(clean_addr(bad), None, "{bad}");
+        }
+    }
+
+    /// 自定义代理没开：直接报错、报错里带代理地址，不退回直连
+    #[tokio::test]
+    async fn custom_proxy_down_is_error() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        drop(l);
+        let r = dial_by(Some((addr.clone(), true)), "imap.example.com", 993).await;
+        let e = r.err().expect("应该报错");
+        assert!(e.contains(&addr), "{e}");
     }
 
     /// 假代理：回 200 后紧跟一行「欢迎语」，确认欢迎语没被握手吃掉

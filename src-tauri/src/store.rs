@@ -137,9 +137,51 @@ fn v2_translations(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
          );",
     )
 }
-const MIGRATIONS: &[Step] = &[v2_translations];
+/// 数据版本 3：会话编号。messages.thread_id 是这封邮件所在的会话；thread_keys 记每个 Message-ID 属于哪一串
+/// （邮件删了也留着，之后的回复还能对上）；thread_seq 只用来发新编号。旧邮件按时间顺序补一遍
+fn v3_threads(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE messages ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0;\n\
+         CREATE TABLE thread_keys (\n\
+           account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,\n\
+           key TEXT NOT NULL,\n\
+           thread_id INTEGER NOT NULL,\n\
+           PRIMARY KEY (account_id, key)\n\
+         ) WITHOUT ROWID;\n\
+         CREATE INDEX idx_tkeys_thread ON thread_keys(account_id, thread_id);\n\
+         CREATE TABLE thread_seq (id INTEGER PRIMARY KEY AUTOINCREMENT);\n\
+         CREATE INDEX idx_msg_thread ON messages(account_id, thread_id);",
+    )?;
+    let rows: Vec<(i64, i64, String, String, String)> = {
+        let mut q = tx.prepare("SELECT id, account_id, msgid, in_reply_to, refs FROM messages ORDER BY date, id")?;
+        let v = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect::<rusqlite::Result<_>>()?;
+        v
+    };
+    for (id, account_id, msgid, in_reply_to, refs) in rows {
+        crate::thread::assign(tx, account_id, id, &msgid, &in_reply_to, &refs)?;
+    }
+    Ok(())
+}
+/// 数据版本 4：邮件规则。account_id 为 NULL 表示所有账号；条件和动作存 JSON（rules.rs 解析、校验）
+fn v4_rules(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS rules (\n\
+           id INTEGER PRIMARY KEY,\n\
+           name TEXT NOT NULL DEFAULT '',\n\
+           enabled INTEGER NOT NULL DEFAULT 1,\n\
+           sort INTEGER NOT NULL DEFAULT 0,\n\
+           account_id INTEGER REFERENCES accounts(id) ON DELETE CASCADE,\n\
+           match_all INTEGER NOT NULL DEFAULT 1,\n\
+           conds_json TEXT NOT NULL DEFAULT '[]',\n\
+           actions_json TEXT NOT NULL DEFAULT '[]',\n\
+           stop INTEGER NOT NULL DEFAULT 0,\n\
+           created INTEGER NOT NULL\n\
+         );",
+    )
+}
+const MIGRATIONS: &[Step] = &[v2_translations, v3_threads, v4_rules];
 /// 当前代码对应的数据版本
-const LATEST: i64 = MIGRATIONS.len() as i64 + 1;
+pub const LATEST: i64 = MIGRATIONS.len() as i64 + 1;
 
 /// 表里没有这一列才加
 fn add_column(conn: &Connection, table: &str, col: &str, def: &str) -> Result<()> {

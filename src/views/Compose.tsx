@@ -205,8 +205,8 @@ export default function Compose() {
   const title = c.mode === 'reply' || c.mode === 'replyAll' ? L(`回复 ${base?.fromName || base?.fromAddr || ''}`, `Reply to ${base?.fromName || base?.fromAddr || ''}`) : c.mode === 'forward' ? L('转发', 'Forward') : L('新邮件', 'New email')
 
   return (
-    <Sheet onClose={close} className="compose" label={title}>
-      <div className="c-bar">
+    <Sheet onClose={close} className="compose" label={title} pinned>
+      <div className="c-bar" data-tauri-drag-region>
         <button className="btn primary sq" onClick={send}><Icon name="send" size={15} />{L('发送', 'Send')}</button>
         <span style={{ width: .5, height: 18, background: 'var(--line)', margin: '0 6px' }} />
         <button className="tb" aria-label={L('添加附件', 'Attach files')} data-tip={L('添加附件', 'Attach files')} onClick={async () => {
@@ -214,7 +214,7 @@ export default function Compose() {
           if (r) setFiles((f) => [...f, ...(Array.isArray(r) ? r : [r]).filter((p) => !f.includes(p))])
         }}><Icon name="clip" /></button>
         <button className="tb" aria-label={L('舍弃草稿', 'Discard draft')} data-tip={L('舍弃草稿', 'Discard draft')} onClick={async () => { if (!body.trim() || await ask(L('舍弃这封草稿？', 'Discard this draft?'))) discard() }}><Icon name="trash" /></button>
-        <div className="grow truncate" style={{ textAlign: 'center', fontSize: 13, fontWeight: 600 }}>{title}</div>
+        <div className="grow truncate" data-tauri-drag-region style={{ textAlign: 'center', fontSize: 13, fontWeight: 600 }}>{title}</div>
         {s.aiConfigured ? (
           <button className="btn sm sq" style={{ background: aiOpen ? 'var(--sel)' : 'transparent', boxShadow: 'none' }} aria-pressed={aiOpen} onClick={() => setAiOpen(!aiOpen)}><Icon name="sparkle" size={15} />{L('AI 助手', 'AI assistant')}</button>
         ) : (

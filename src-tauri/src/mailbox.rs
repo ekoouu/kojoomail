@@ -369,6 +369,7 @@ async fn run(ctx: Arc<Ctx>, id: i64, rx: mpsc::UnboundedReceiver<Op>, wake: Arc<
                     last_full: 0,
                     rx: rx.take().unwrap(),
                     backlog: std::mem::take(&mut backlog),
+                    skip_rules: false,
                 };
                 let r = w.serve(&wake, &stop).await;
                 if let Some(s) = w.s.take() {
@@ -406,6 +407,8 @@ struct SessionWorker {
     last_full: i64,
     rx: mpsc::UnboundedReceiver<Op>,
     backlog: Backlog,
+    /// Op::Move 同步目标文件夹时为真：本机移动带进来的信不跑邮件规则
+    skip_rules: bool,
 }
 
 #[derive(Clone)]
@@ -698,9 +701,12 @@ impl SessionWorker {
     async fn sync_folder(&mut self, f: &FolderRow, notify_new: bool) -> Result<()> {
         let mb = self.select(&f.path).await?;
         let uv = mb.uid_validity.unwrap_or(0) as i64;
+        let rebuilt = f.uidvalidity != 0 && uv != 0 && f.uidvalidity != uv;
+        // 第一次同步这个文件夹（不是「本地刚好清空了」）才算首次，首次不发提醒
+        let initial = f.last_sync == 0;
         let (local_count, local_max, local_min): (i64, i64, i64) = {
             let st = self.ctx.store.lock().unwrap();
-            if f.uidvalidity != 0 && uv != 0 && f.uidvalidity != uv {
+            if rebuilt {
                 // 服务器重建了文件夹：本地缓存作废
                 let ids: Vec<i64> = {
                     let mut q = st.conn.prepare("SELECT id FROM messages WHERE folder_id=?")?;
@@ -730,8 +736,6 @@ impl SessionWorker {
             v.sort_unstable_by(|a, b| b.cmp(a));
             v
         };
-        // 第一次同步这个文件夹（不是「本地刚好清空了」）才算首次，首次不发提醒
-        let initial = f.last_sync == 0;
         let mut inserted = vec![];
         for chunk in new_uids.chunks(150) {
             let set = chunk.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
@@ -778,6 +782,8 @@ impl SessionWorker {
                 )?;
                 if n > 0 {
                     let id = tx.last_insert_rowid();
+                    // 定会话编号（要在取到 id 之后：里面也会插入行）
+                    crate::thread::assign(&tx, self.cfg.id, id, &h.msgid, &h.in_reply_to, &h.refs)?;
                     let people = format!("{} {} {}", h.from.name, h.from.email, h.to.iter().map(|a| format!("{} {}", a.name, a.email)).collect::<Vec<_>>().join(" "));
                     tx.execute("INSERT INTO msg_fts(rowid, subject, people, body) VALUES(?,?,?,'')", params![id, h.subject, people])?;
                     inserted.push((id, seen, h.bulk, date));
@@ -833,6 +839,16 @@ impl SessionWorker {
             tx.commit()?;
             st.delete_messages(&gone)?;
         }
+        // 邮件规则只对收件箱里这次新到的信跑一次；首次同步、服务器重建文件夹后整批重拉的、本机移动带进来的都不算
+        let mut quiet = HashSet::new();
+        if f.role == "inbox" && !initial && !rebuilt && !self.skip_rules && !inserted.is_empty() {
+            let ids: Vec<i64> = inserted.iter().map(|x| x.0).collect();
+            let (ops, q) = crate::rules::run(&self.ctx, self.cfg.id, f.id, &f.path, &ids);
+            for op in ops {
+                self.backlog.push_back((op, 0));
+            }
+            quiet = q;
+        }
         {
             let st = self.ctx.store.lock().unwrap();
             st.conn.execute("UPDATE folders SET last_sync=? WHERE id=?", params![now(), f.id])?;
@@ -842,7 +858,7 @@ impl SessionWorker {
 
         // 3. 新邮件提醒（首次同步不提醒；未读、两天内的才算）
         if notify_new && !initial {
-            let fresh: Vec<i64> = inserted.iter().filter(|(_, seen, _, date)| !seen && now() - date < 2 * 86400).map(|x| x.0).collect();
+            let fresh: Vec<i64> = inserted.iter().filter(|(id, seen, _, date)| !seen && now() - date < 2 * 86400 && !quiet.contains(id)).map(|x| x.0).collect();
             if !fresh.is_empty() {
                 let _ = self.ctx.newmail_tx.send(fresh);
             }
@@ -874,6 +890,7 @@ impl SessionWorker {
             if self.fetch_body(id, &inbox.path, uid).await.is_err() {
                 break;
             }
+            crate::ai::code_ready(&self.ctx, id);
             let _ = self.ctx.ai_tx.send(crate::ai::Job::Auto(id));
         }
     }
@@ -944,7 +961,10 @@ impl SessionWorker {
                 // 同步目标文件夹，按 Message-ID 对上占位；对不上的（没有 Message-ID）删掉占位，用服务器上的新副本
                 if let Some(fid) = self.folder_id_by_path(&to) {
                     if let Some(f) = self.folder_by_id(fid) {
-                        self.sync_folder(&f, false).await?;
+                        self.skip_rules = true;
+                        let r = self.sync_folder(&f, false).await;
+                        self.skip_rules = false;
+                        r?;
                     }
                 }
                 let st = self.ctx.store.lock().unwrap();
