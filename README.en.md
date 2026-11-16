@@ -174,7 +174,7 @@ See the [roadmap](https://github.com/ekoouu/kojoomail/issues/6) for what's plann
 
 Thanks to the [LINUX DO](https://linux.do) community, where this project was first shared and got its early feedback.
 
-Thanks to everyone who has contributed code: [@Birdy0109](https://github.com/Birdy0109).
+Thanks to everyone who has contributed code: [@Birdy0109](https://github.com/Birdy0109) and [@Luxciax](https://github.com/Luxciax).
 
 ## License
 

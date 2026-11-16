@@ -115,9 +115,7 @@ pub fn parse_full(raw: &[u8]) -> Full {
             .unwrap_or_else(|| "application/octet-stream".into())
             .to_lowercase();
         let inline = p.content_id().is_some() && mime.starts_with("image/") && p.attachment_name().is_none();
-        let name = p.attachment_name().map(|s| s.to_string()).unwrap_or_else(|| {
-            if p.is_message() { tr!("邮件附件 {}.eml", "Attached email {}.eml", idx + 1) } else { tr!("附件 {}", "Attachment {}", idx + 1) }
-        });
+        let name = att_name(&p, idx, &mime);
         atts.push(AttInfo { idx, name, size: p.contents().len(), mime, inline });
     }
     Full { text, html, atts }
@@ -127,8 +125,75 @@ pub fn parse_full(raw: &[u8]) -> Full {
 pub fn attachment_bytes(raw: &[u8], idx: usize) -> Option<(String, Vec<u8>)> {
     let m = MessageParser::default().parse(raw)?;
     let p = m.attachment(idx as u32 as usize)?;
-    let name = p.attachment_name().map(|s| s.to_string()).unwrap_or_else(|| tr!("附件 {}", "Attachment {}", idx + 1));
+    let mime = p.content_type().map(|c| format!("{}/{}", c.ctype(), c.subtype().unwrap_or(""))).unwrap_or_else(|| "application/octet-stream".into()).to_lowercase();
+    let name = att_name(p, idx, &mime);
     Some((name, p.contents().to_vec()))
+}
+
+/// 附件的名字：列表显示、保存、打开都用这一个，不会一处有后缀一处没有
+fn att_name(p: &mail_parser::MessagePart, idx: usize, mime: &str) -> String {
+    match p.attachment_name() {
+        Some(s) => fix_att_name(s, if p.is_message() { "message/rfc822" } else { mime }),
+        None if p.is_message() => tr!("邮件附件 {}.eml", "Attached email {}.eml", idx + 1),
+        None => fix_att_name(&tr!("附件 {}", "Attachment {}", idx + 1), mime),
+    }
+}
+
+/// 附件名收尾：
+/// 1. 名字里还留着 =?utf-8?B?…?= 这种编码（有的发件方把编码过的名字拆成 filename*0 / filename*1 两段，
+///    解析库拼起来就不再解码了，比如通行费电子发票）→ 再解一次。借解析库自己解标题的那套，各种字符集都认
+/// 2. 没有后缀、但类型明确（PDF、压缩包这些）→ 按类型补上后缀，不然存下来打不开、点开也会被当成程序拦下
+pub fn fix_att_name(name: &str, mime: &str) -> String {
+    let mut n = strip_invisible(name.trim());
+    if n.contains("=?") && n.contains("?=") {
+        let fake = format!("Subject: {}\r\n\r\n", n.replace(['\r', '\n'], ""));
+        if let Some(s) = MessageParser::default().parse(fake.as_bytes()).and_then(|m| m.subject().map(|s| s.to_string())) {
+            if !s.trim().is_empty() && !s.contains("=?") {
+                n = strip_invisible(s.trim());
+            }
+        }
+    }
+    // 点后面是英文字母开头的短串就算已有后缀（server.log、config.yaml、本来就是 .exe 的照旧认，打开时照旧被拦）；
+    // 纯数字（「发票 35.50」「2026.11」）、带空格或别的字符的不算，按类型补
+    let has_ext = std::path::Path::new(&n).extension().map(|e| e.to_string_lossy().to_string()).is_some_and(|e| {
+        let mut cs = e.chars();
+        e.len() <= 8 && cs.next().is_some_and(|c| c.is_ascii_alphabetic()) && cs.all(|c| c.is_ascii_alphanumeric())
+    });
+    if !has_ext {
+        let ext = match mime {
+            "message/rfc822" => "eml",
+            "application/pdf" => "pdf",
+            "application/zip" | "application/x-zip-compressed" => "zip",
+            "application/ofd" => "ofd",
+            "text/xml" | "application/xml" => "xml",
+            "image/jpeg" => "jpg",
+            "image/png" => "png",
+            "application/msword" => "doc",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+            "application/vnd.ms-excel" => "xls",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+            "text/csv" => "csv",
+            "text/plain" => "txt",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            "application/vnd.ms-powerpoint" => "ppt",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+            "application/x-rar-compressed" | "application/vnd.rar" => "rar",
+            "application/x-7z-compressed" => "7z",
+            _ => "",
+        };
+        if !ext.is_empty() {
+            n = format!("{n}.{ext}");
+        }
+    }
+    n
+}
+
+/// 去掉文件名里看不见的格式字符：反向显示（U+202E 等能把名为 invoice<U+202E>fdp.exe 的程序显示成 .pdf 结尾）、零宽字符、BOM
+fn strip_invisible(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(*c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}' | '\u{061C}' | '\u{180E}'))
+        .collect()
 }
 
 /// 正文里 cid: 引用的内嵌图片 → data: URL（单张 ≤ 3MB，总共 ≤ 10MB）
@@ -183,6 +248,32 @@ mod tests {
         assert!(g.bulk && !g.subscription, "带退订头的系统通知仍是通知");
         let f = parse_full(raw);
         assert!(f.text.contains("Hello") && !f.text.contains("color"));
+    }
+    #[test]
+    fn split_encoded_att_name() {
+        // 通行费电子发票的真实写法：编码过的名字被拆成两段
+        let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\nhi\r\n--B\r\nContent-Type: application/pdf; \r\n\tname*0=\"=?utf-8?B?6YCa6KGM6LS555S15a2Q56Wo5o2u5rGH5oC75Y2VKOelqOaNri\"; \r\n\tname*1=\"kucGRm?=\"\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; \r\n\tfilename*0=\"=?utf-8?B?6YCa6KGM6LS555S15a2Q56Wo5o2u5rGH5oC75Y2VKOelqOaNri\"; \r\n\tfilename*1=\"kucGRm?=\"\r\n\r\nJVBERi0=\r\n--B--\r\n";
+        let f = parse_full(raw);
+        assert_eq!(f.atts.len(), 1);
+        assert_eq!(f.atts[0].name, "通行费电子票据汇总单(票据).pdf");
+        assert_eq!(attachment_bytes(raw, 0).unwrap().0, "通行费电子票据汇总单(票据).pdf");
+        // 没后缀的按类型补；正常名字不动；解不开的原样留着
+        assert_eq!(fix_att_name("发票", "application/pdf"), "发票.pdf");
+        assert_eq!(fix_att_name("发票.pdf", "application/octet-stream"), "发票.pdf");
+        assert_eq!(fix_att_name("报告", "application/octet-stream"), "报告");
+        assert_eq!(fix_att_name("=?gbk?B?suLK1A==?=", "text/plain"), "测试.txt");
+        // 点后面不是常见后缀的照样补；本来是可执行后缀的不补（打开时照旧被拦）
+        assert_eq!(fix_att_name("通行费发票 35.50", "application/pdf"), "通行费发票 35.50.pdf");
+        assert_eq!(fix_att_name("a@b.com", "application/pdf"), "a@b.com");
+        assert_eq!(fix_att_name("Forwarded message", "message/rfc822"), "Forwarded message.eml");
+        // 不常见但正常的后缀不多补
+        assert_eq!(fix_att_name("server.log", "text/plain"), "server.log");
+        assert_eq!(fix_att_name("config.yaml", "text/plain"), "config.yaml");
+        assert_eq!(fix_att_name("a.xlsm", "application/vnd.ms-excel"), "a.xlsm");
+        assert_eq!(fix_att_name("发票 2026.11", "application/pdf"), "发票 2026.11.pdf");
+        // 反向显示字符被去掉：显示出来就是真实的 .exe
+        assert_eq!(fix_att_name("invoice\u{202E}fdp.exe", "application/octet-stream"), "invoicefdp.exe");
+        assert_eq!(fix_att_name("=?utf-8?B?aW52b2ljZeKArmZkcC5leGU=?=", "application/pdf"), "invoicefdp.exe");
     }
     #[test]
     fn base64() {

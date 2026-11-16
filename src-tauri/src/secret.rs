@@ -31,7 +31,7 @@ pub fn get(key: &str) -> Option<String> {
         if let Some(v) = c.as_ref() {
             return v.clone();
         }
-        let v = entry(key).ok().and_then(|e| e.get_password().ok());
+        let v = entry(key).ok().and_then(|e| e.get_password().ok()).map(|s| unwrap_ai_key(&s));
         *c = Some(v.clone());
         return v;
     }
@@ -64,3 +64,32 @@ pub fn account_key(account_id: i64) -> String {
 }
 
 pub const AI_KEY: &str = "ai-api-key";
+
+/// 密钥框里粘贴的是整段配置（New API / One API 后台「复制配置」给的 {"_type":…,"key":"sk-…","url":…} 这类）时，取出里面的密钥。
+/// 普通密钥原样返回。2026-11-16：整段当密钥发出去，网关回 401 Invalid token
+pub fn unwrap_ai_key(s: &str) -> String {
+    let t = s.trim();
+    if t.starts_with('{') {
+        if let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<serde_json::Value>(t) {
+            for k in ["key", "api_key", "apiKey", "apikey", "token", "access_token"] {
+                if let Some(serde_json::Value::String(v)) = m.get(k) {
+                    if !v.trim().is_empty() {
+                        return v.trim().to_string();
+                    }
+                }
+            }
+        }
+    }
+    t.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn unwrap_pasted_config() {
+        assert_eq!(super::unwrap_ai_key(r#"{"_type":"newapi_channel_conn","key":"sk-abc","url":"https://x.example"}"#), "sk-abc");
+        assert_eq!(super::unwrap_ai_key("  sk-plain  "), "sk-plain");
+        assert_eq!(super::unwrap_ai_key("{not json"), "{not json");
+        assert_eq!(super::unwrap_ai_key(r#"{"url":"https://x"}"#), r#"{"url":"https://x"}"#);
+    }
+}

@@ -668,7 +668,7 @@ pub async fn get_message(ctx: State<'_, Arc<Ctx>>, id: i64) -> Res<MsgFull> {
                     in_reply_to: r.get(24)?,
                     text: r.get(25)?,
                     html: r.get(26)?,
-                    atts: serde_json::from_str::<Vec<AttInfo>>(&atts).unwrap_or_default(),
+                    atts: serde_json::from_str::<Vec<AttInfo>>(&atts).unwrap_or_default().into_iter().map(|mut a| { a.name = crate::mime::fix_att_name(&a.name, &a.mime); a }).collect(),
                     ai: None,
                     ai_pending: false,
                     todos: vec![],
@@ -706,7 +706,7 @@ pub async fn get_message(ctx: State<'_, Arc<Ctx>>, id: i64) -> Res<MsgFull> {
         })
         .optional()
         .map_err(e)?;
-    let mut q = st.conn.prepare(&format!("SELECT {TODO_COLS} FROM todos WHERE msg_id=? ORDER BY done, id")).map_err(e)?;
+    let mut q = st.conn.prepare(&format!("SELECT {TODO_COLS} FROM todos WHERE msg_id=? AND done<2 ORDER BY done, id")).map_err(e)?;
     full.todos = q.query_map([id], todo_row).map_err(e)?.filter_map(|x| x.ok()).collect();
     drop(q);
     drop(st);
@@ -1680,19 +1680,19 @@ pub async fn list_todos(ctx: State<'_, Arc<Ctx>>, filter: String) -> Res<Vec<Tod
 pub async fn todo_set(ctx: State<'_, Arc<Ctx>>, id: i64, done: Option<bool>, text: Option<String>, due: Option<i64>, clear_due: Option<bool>, priority: Option<String>) -> Res<()> {
     let st = ctx.store.lock().unwrap();
     if let Some(d) = done {
-        st.conn.execute("UPDATE todos SET done=?, done_at=? WHERE id=?", params![d, if d { Some(now()) } else { None }, id]).map_err(e)?;
+        st.conn.execute("UPDATE todos SET done=?, done_at=? WHERE id=? AND done<2", params![d, if d { Some(now()) } else { None }, id]).map_err(e)?;
     }
     if let Some(t) = text.filter(|t| !t.trim().is_empty()) {
-        st.conn.execute("UPDATE todos SET text=? WHERE id=?", params![t.trim(), id]).map_err(e)?;
+        st.conn.execute("UPDATE todos SET text=? WHERE id=? AND done<2", params![t.trim(), id]).map_err(e)?;
     }
     if let Some(d) = due {
-        st.conn.execute("UPDATE todos SET due=? WHERE id=?", params![d, id]).map_err(e)?;
+        st.conn.execute("UPDATE todos SET due=? WHERE id=? AND done<2", params![d, id]).map_err(e)?;
     }
     if clear_due == Some(true) {
-        st.conn.execute("UPDATE todos SET due=NULL WHERE id=?", [id]).map_err(e)?;
+        st.conn.execute("UPDATE todos SET due=NULL WHERE id=? AND done<2", [id]).map_err(e)?;
     }
     if let Some(p) = priority {
-        st.conn.execute("UPDATE todos SET priority=? WHERE id=?", params![p, id]).map_err(e)?;
+        st.conn.execute("UPDATE todos SET priority=? WHERE id=? AND done<2", params![p, id]).map_err(e)?;
     }
     drop(st);
     changed(&ctx);
@@ -1721,7 +1721,19 @@ pub async fn todo_add(ctx: State<'_, Arc<Ctx>>, text: String, due: Option<i64>, 
 
 #[tauri::command]
 pub async fn todo_delete(ctx: State<'_, Arc<Ctx>>, id: i64) -> Res<()> {
-    ctx.store.lock().unwrap().conn.execute("DELETE FROM todos WHERE id=?", [id]).map_err(e)?;
+    // AI 提取的待办删除时留一个看不见的记号（done=2），这封信再被分析时就不会把它重新提取出来；手动加的照旧真删
+    {
+        let st = ctx.store.lock().unwrap();
+        let n = st
+            .conn
+            .execute("UPDATE todos SET done=2, done_at=?1 WHERE id=?2 AND source='ai' AND msg_id IS NOT NULL", rusqlite::params![now(), id])
+            .map_err(e)?;
+        if n == 0 {
+            st.conn.execute("DELETE FROM todos WHERE id=?", [id]).map_err(e)?;
+        }
+        // 来源邮件已经不在了的记号没有意义
+        st.conn.execute("DELETE FROM todos WHERE done=2 AND msg_id IS NULL", []).map_err(e)?;
+    }
     changed(&ctx);
     Ok(())
 }
@@ -1932,11 +1944,11 @@ pub async fn save_settings(app: tauri::AppHandle, ctx: State<'_, Arc<Ctx>>, s: S
 
 #[tauri::command]
 pub async fn set_ai_key(ctx: State<'_, Arc<Ctx>>, key: String) -> Res<bool> {
-    let k = key.trim();
+    let k = secret::unwrap_ai_key(&key);
     if k.is_empty() {
         secret::delete(secret::AI_KEY);
     } else {
-        secret::set(secret::AI_KEY, k).map_err(e)?;
+        secret::set(secret::AI_KEY, &k).map_err(e)?;
     }
     Ok(ai::configured(&ctx))
 }

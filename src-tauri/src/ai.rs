@@ -285,6 +285,9 @@ async fn analyze(ctx: &Arc<Ctx>, id: i64, force: bool) -> Result<()> {
     if !m.has_body {
         return Err(anyhow!("{}", crate::i18n::t("正文还没下载", "The email body hasn't been downloaded yet")));
     }
+    if let Some(old) = m.existing {
+        crate::applog::info(&format!("AI 重新分析 #{id}（原状态 {old}，{}）", if force { "用户点的" } else { "自动" }));
+    }
     let _ = ctx.app.emit("ai-state", serde_json::json!({ "msgId": id, "state": "running" }));
     // 用户点「完整分析」（force）时不管账号设置，做完整批注
     let classify = m.classify_only && !force;
@@ -352,27 +355,37 @@ async fn analyze(ctx: &Arc<Ctx>, id: i64, force: bool) -> Result<()> {
                  VALUES(?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![id, get("summary"), category, priority, get("reason"), serde_json::to_string(&facts)?, get("reply"), get("reply_lang"), model, now()],
             )?;
-            // 待办：同一封信重新分析时替换 AI 提取的那部分
-            st.conn.execute("DELETE FROM todos WHERE msg_id=? AND source='ai' AND done=0", [id])?;
-            if let Some(todos) = v.get("todos").and_then(|x| x.as_array()) {
-                for t in todos.iter().take(5) {
-                    let txt = t.get("text").and_then(|x| x.as_str()).unwrap_or("").trim();
-                    if txt.is_empty() {
-                        continue;
-                    }
-                    let due = t.get("due").and_then(|x| x.as_str()).and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).and_then(|d| d.and_hms_opt(18, 0, 0)).map(|d| d.and_local_timezone(chrono::Local).single().map(|x| x.timestamp())).flatten();
-                    st.conn.execute(
-                        "INSERT INTO todos(msg_id, account_id, text, due, priority, source, src_subject, src_from, created) VALUES(?,?,?,?,?, 'ai', ?, ?, ?)",
-                        params![id, m.account_id, txt.chars().take(120).collect::<String>(), due, if priority == "high" { "high" } else { "normal" }, m.subject, if m.from_name.is_empty() { &m.from_addr } else { &m.from_name }, now()],
-                    )?;
-                }
-            }
+            write_ai_todos(&st.conn, id, m.account_id, &priority, &m.subject, if m.from_name.is_empty() { &m.from_addr } else { &m.from_name }, &v)?;
             drop(st);
             let _ = ctx.app.emit("ai-state", serde_json::json!({ "msgId": id, "state": "done" }));
             finish_notify(ctx, id, Some((priority.as_str(), category.as_str(), get("summary"))));
         }
     }
     Ok(())
+}
+
+/// 写入这封信 AI 提取的待办：同一封信重新分析时替换 AI 提取的那部分。
+/// 用户勾掉或删除过这封信的 AI 待办（done>=1），重新分析不再动它的待办，返回 false。
+fn write_ai_todos(conn: &rusqlite::Connection, msg_id: i64, account_id: i64, priority: &str, subject: &str, from: &str, v: &Value) -> rusqlite::Result<bool> {
+    let settled: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM todos WHERE msg_id=?1 AND source='ai' AND done>=1)", [msg_id], |r| r.get(0))?;
+    if settled {
+        return Ok(false);
+    }
+    conn.execute("DELETE FROM todos WHERE msg_id=? AND source='ai' AND done=0", [msg_id])?;
+    if let Some(todos) = v.get("todos").and_then(|x| x.as_array()) {
+        for t in todos.iter().take(5) {
+            let txt = t.get("text").and_then(|x| x.as_str()).unwrap_or("").trim();
+            if txt.is_empty() {
+                continue;
+            }
+            let due = t.get("due").and_then(|x| x.as_str()).and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).and_then(|d| d.and_hms_opt(18, 0, 0)).map(|d| d.and_local_timezone(chrono::Local).single().map(|x| x.timestamp())).flatten();
+            conn.execute(
+                "INSERT INTO todos(msg_id, account_id, text, due, priority, source, src_subject, src_from, created) VALUES(?,?,?,?,?, 'ai', ?, ?, ?)",
+                params![msg_id, account_id, txt.chars().take(120).collect::<String>(), due, if priority == "high" { "high" } else { "normal" }, subject, from, now()],
+            )?;
+        }
+    }
+    Ok(true)
 }
 
 /// 主题像验证码邮件、验证码却不在主题里、正文还没取：提醒等正文到了再发（好把验证码放进通知）
@@ -573,5 +586,47 @@ mod tests {
         // CUSTOM_NOTE 自己带「偏好」的「好」，扣掉
         let long = with_custom("P", &"好".repeat(600));
         assert_eq!(long.matches('好').count() - CUSTOM_NOTE.matches('好').count(), 500);
+    }
+    #[test]
+    fn settled_todos_stay() {
+        let d = std::env::temp_dir().join(format!("kjm-ai-todos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        {
+            let st = crate::store::Store::open(&d).unwrap();
+            let c = &st.conn;
+            c.execute(
+                "INSERT INTO accounts (id, email, username, imap_host, imap_port, smtp_host, smtp_port, ai_allowed, created) VALUES (1, 'a@example.com', 'a@example.com', 'h', 993, 'h', 465, 1, 0)",
+                [],
+            )
+            .unwrap();
+            c.execute("INSERT INTO folders (id, account_id, path, name, role) VALUES (1, 1, 'INBOX', 'Inbox', 'inbox')", []).unwrap();
+            for id in [1, 2] {
+                c.execute(
+                    "INSERT INTO messages (id, account_id, folder_id, uid, from_addr, subject, date, has_body, body_text) VALUES (?1, 1, 1, ?1, 'x@example.com', 'S', 1700000000, 1, 'b')",
+                    [id],
+                )
+                .unwrap();
+            }
+            let v = serde_json::json!({"todos":[{"text":"甲","due":null},{"text":"乙","due":"2026-11-20"}]});
+            let count = |msg: i64| -> i64 { c.query_row("SELECT COUNT(*) FROM todos WHERE msg_id=?", [msg], |r| r.get(0)).unwrap() };
+            // 第一次写入
+            assert!(write_ai_todos(c, 1, 1, "normal", "S", "x", &v).unwrap());
+            assert_eq!(count(1), 2);
+            // 都没处理过：替换而不是累加
+            assert!(write_ai_todos(c, 1, 1, "normal", "S", "x", &v).unwrap());
+            assert_eq!(count(1), 2);
+            // 勾掉一条：不再动
+            c.execute("UPDATE todos SET done=1 WHERE id=(SELECT MIN(id) FROM todos WHERE msg_id=1)", []).unwrap();
+            assert!(!write_ai_todos(c, 1, 1, "normal", "S", "x", &v).unwrap());
+            assert_eq!(count(1), 2);
+            let done1: i64 = c.query_row("SELECT COUNT(*) FROM todos WHERE msg_id=1 AND done=1", [], |r| r.get(0)).unwrap();
+            assert_eq!(done1, 1);
+            // 删掉一条（留记号 done=2）：不再动
+            assert!(write_ai_todos(c, 2, 1, "normal", "S", "x", &v).unwrap());
+            c.execute("UPDATE todos SET done=2 WHERE id=(SELECT MIN(id) FROM todos WHERE msg_id=2)", []).unwrap();
+            assert!(!write_ai_todos(c, 2, 1, "normal", "S", "x", &v).unwrap());
+            assert_eq!(count(2), 2);
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

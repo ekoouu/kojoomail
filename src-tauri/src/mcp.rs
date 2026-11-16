@@ -349,7 +349,7 @@ fn read_mail(conn: &Connection, args: &Value) -> Result<String, String> {
     let parse = |s: &str| serde_json::from_str::<Value>(s).unwrap_or_else(|_| json!([]));
     let atts: Vec<Value> = parse(&att_json)
         .as_array()
-        .map(|a| a.iter().filter(|x| !x.get("inline").and_then(Value::as_bool).unwrap_or(false)).map(|x| json!({ "name": x.get("name").cloned().unwrap_or(Value::Null), "size": x.get("size").cloned().unwrap_or(Value::Null) })).collect())
+        .map(|a| a.iter().filter(|x| !x.get("inline").and_then(Value::as_bool).unwrap_or(false)).map(|x| json!({ "name": x.get("name").and_then(Value::as_str).map(|n| crate::mime::fix_att_name(n, x.get("mime").and_then(Value::as_str).unwrap_or(""))).map(Value::from).unwrap_or(Value::Null), "size": x.get("size").cloned().unwrap_or(Value::Null) })).collect())
         .unwrap_or_default();
     let mut out = json!({
         "id": id,
@@ -406,7 +406,7 @@ fn mail_ai_notes(conn: &Connection, args: &Value) -> Result<String, String> {
                 "facts": serde_json::from_str::<Value>(&facts).unwrap_or_else(|_| json!([])),
             })
         });
-    let mut q = conn.prepare("SELECT text, due, priority, done FROM todos WHERE msg_id = ?").map_err(e)?;
+    let mut q = conn.prepare("SELECT text, due, priority, done FROM todos WHERE msg_id = ? AND done < 2").map_err(e)?;
     let todos: Vec<Value> = q
         .query_map([id], |r| {
             let due: Option<i64> = r.get(1)?;

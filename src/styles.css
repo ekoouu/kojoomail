@@ -240,6 +240,13 @@ a { color: var(--navy); }
 .nav.on .cnt { color: var(--ink); font-weight: 600; }
 .nav .chev { width: 12px; margin: 0 -6px 0 -4px; display: inline-flex; color: var(--ter); transition: transform .15s; }
 .nav .chev.open { transform: rotate(90deg); }
+/* 设置 → 账号：可折叠的账号标题（样子同原来的小标题，整行可点） */
+.acct-fold { gap: 6px; width: calc(100% - 14px); border: 0; background: none; padding-left: 0; padding-right: 0; cursor: pointer; text-align: left; font: inherit; color: inherit; }
+.acct-fold .chev { width: 12px; display: inline-flex; color: var(--ter); transition: transform .15s; }
+.acct-fold .chev.open { transform: rotate(90deg); }
+.acct-fold:hover .chev { color: var(--sec); }
+.set-main .acct-closed .gh { margin-bottom: 0; }
+.set-main .acct-closed + .acct-closed { margin-top: -12px; }
 .nav.sub { padding-left: 34px; min-height: 28px; font-size: 12.5px; }
 .nav .err-line { display: block; font-size: 11px; color: var(--accent-text); }
 .side .foot { flex: none; padding: 8px 10px 0; }

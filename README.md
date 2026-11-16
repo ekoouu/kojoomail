@@ -172,7 +172,7 @@ bash scripts/build-mac.sh          # macOS（在 Mac 上跑）
 
 感谢 [LINUX DO](https://linux.do) 社区，项目最早在这里分享和收集反馈。
 
-感谢贡献代码的朋友：[@Birdy0109](https://github.com/Birdy0109)。
+感谢贡献代码的朋友：[@Birdy0109](https://github.com/Birdy0109)、[@Luxciax](https://github.com/Luxciax)。
 
 ## 许可证
 

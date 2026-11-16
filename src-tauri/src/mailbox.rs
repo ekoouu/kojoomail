@@ -713,6 +713,7 @@ impl SessionWorker {
                     let v = q.query_map([f.id], |r| r.get(0))?.filter_map(|x| x.ok()).collect();
                     v
                 };
+                crate::applog::warn(&format!("文件夹（{}）被服务器重建：UIDVALIDITY {} → {}，本地 {} 封作废重拉", f.role, f.uidvalidity, uv, ids.len()));
                 st.delete_messages(&ids)?;
             }
             st.conn.execute("UPDATE folders SET uidvalidity=? WHERE id=?", params![uv, f.id])?;

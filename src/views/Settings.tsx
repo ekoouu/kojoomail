@@ -156,16 +156,30 @@ function General() {
 
 function Accounts() {
   const s = useApp()
+  // 每个账号卡片展开没有（2026-11：账号多了一页要滑很久）。记在这台电脑上，下次打开设置还是这个样子
+  const [open, setOpenRaw] = useState<Record<number, boolean>>(() => { try { return JSON.parse(localStorage.getItem('kjm.settings.accountsOpen') || '{}') } catch { return {} } })
+  const setOpen = (v: Record<number, boolean>) => { setOpenRaw(v); try { localStorage.setItem('kjm.settings.accountsOpen', JSON.stringify(v)) } catch { /* 存不下就只在这次有效 */ } }
   return (
     <>
       <Head title={L('账号', 'Accounts')} lead={L('每个账号的名称、颜色、签名和登录密码。', 'Name, color, signature and sign-in for each account.')} />
-      {s.accounts.map((a) => <AccountCard key={a.id} a={a} />)}
+      {s.accounts.length > 1 && (
+        <div className="row" style={{ justifyContent: 'flex-end', gap: 6, marginBottom: -8 }}>
+          <button className="btn sm sq" onClick={() => setOpen(Object.fromEntries(s.accounts.map((a) => [a.id, true])))}>{L('全部展开', 'Expand all')}</button>
+          <button className="btn sm sq" onClick={() => setOpen(Object.fromEntries(s.accounts.map((a) => [a.id, false])))}>{L('全部收起', 'Collapse all')}</button>
+        </div>
+      )}
+      {s.accounts.map((a) => {
+        // 只有一个账号时一直展开；多个账号时默认收起，连不上的那个默认展开（要去修）
+        const err = ['error', 'offline'].includes(s.status[a.id]?.state ?? '')
+        const opened = s.accounts.length === 1 || (open[a.id] ?? err)
+        return <AccountCard key={a.id} a={a} open={opened} onToggle={s.accounts.length > 1 ? () => setOpen({ ...open, [a.id]: !opened }) : undefined} />
+      })}
       <div><button className="btn primary sq" onClick={() => s.set({ addAccount: 'pick' })}><Icon name="plus" size={15} />{L('添加账号', 'Add account')}</button></div>
     </>
   )
 }
 
-function AccountCard({ a }: { a: Account }) {
+function AccountCard({ a, open = true, onToggle }: { a: Account; open?: boolean; onToggle?: () => void }) {
   const s = useApp()
   const st = s.status[a.id]
   const [label, setLabel] = useState(a.label)
@@ -177,9 +191,16 @@ function AccountCard({ a }: { a: Account }) {
   const save = async (p: Parameters<typeof api.updateAccount>[1]) => { try { await api.updateAccount(a.id, p); s.refreshMeta() } catch (e) { s.toast(errText(e), { kind: 'err' }) } }
   const state = !st ? L('等待连接', 'Waiting to connect') : st.state === 'idle' ? L(`已同步 · ${st.lastOk ? ago(st.lastOk) : ''}`, `Synced · ${st.lastOk ? ago(st.lastOk) : ''}`) : st.state === 'syncing' ? L('正在同步', 'Syncing') : st.state === 'connecting' ? L('正在连接', 'Connecting') : st.state === 'error' ? st.error : L(`离线：${st.error}`, `Offline: ${st.error}`)
   return (
-    <section>
-      <h2 className="gh row" style={{ gap: 6 }}><span className="dot" style={{ background: a.color }} />{a.email}</h2>
-      <div className="group sq">
+    <section className={onToggle && !open ? 'acct-closed' : undefined}>
+      {onToggle ? (
+        <button className="gh row acct-fold" aria-expanded={open} onClick={onToggle}>
+          <span className={`chev${open ? ' open' : ''}`}><Icon name="right" size={12} /></span>
+          <span className="dot" style={{ background: a.color }} />
+          <span className="truncate">{a.label ? `${a.label} · ${a.email}` : a.email}</span>
+          {!open && <span className="grow truncate" style={{ fontSize: 12, fontWeight: 400, textAlign: 'right', color: st?.state === 'error' || st?.state === 'offline' ? 'var(--accent-text)' : 'var(--ter)' }}>{state}</span>}
+        </button>
+      ) : <h2 className="gh row" style={{ gap: 6 }}><span className="dot" style={{ background: a.color }} />{a.email}</h2>}
+      {open && <div className="group sq">
         <div className="gr"><span className="lbl">{L('状态', 'Status')}</span><span style={{ fontSize: 12.5, color: st?.state === 'error' ? 'var(--accent-text)' : 'var(--sec)', maxWidth: 420, textAlign: 'right' }} className="truncate">{state}</span>
           {st?.state === 'error' && <button className="btn sm sq" onClick={() => s.set({ repairAccount: a.id })}>{L('修复', 'Fix')}</button>}
         </div>
@@ -216,7 +237,7 @@ function AccountCard({ a }: { a: Account }) {
             try { await api.removeAccount(a.id); await s.refreshMeta(); s.go({ kind: 'all' }) } catch (e) { s.toast(errText(e), { kind: 'err' }) }
           }}>{L('删除', 'Remove')}</button>
         </div>
-      </div>
+      </div>}
     </section>
   )
 }
