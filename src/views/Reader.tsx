@@ -3,7 +3,7 @@ import { ask } from '../lib/ask'
 import DOMPurify from 'dompurify'
 import { Icon } from '../icons'
 import { curRow, useApp } from '../store'
-import { api, errText, type MsgFull, type MsgLite } from '../lib/api'
+import { api, errText, on, type MsgFull, type MsgLite } from '../lib/api'
 import { addrText, fullTime, shortTime, size } from '../lib/format'
 import { Avatar, Empty, Kojoo, Loader, TipText, useMenu } from '../ui'
 import { laterOptions, mailMenu } from './MailList'
@@ -336,6 +336,61 @@ function hostIn(t: string): string {
   return m ? m[1].toLowerCase().replace(/^www\./, '') : ''
 }
 
+/** 阿里系等邮件常省掉开头的 https:（//host/…）或者只写 www.…：补全了才打得开 */
+const fullHref = (h: string) => { h = h.trim(); return h.startsWith('//') ? `https:${h}` : /^www\./i.test(h) ? `https://${h}` : h }
+
+/** 打开邮件正文里的一个链接。text 是链接上显示的字（用来防钓鱼），doc 是它所在的正文（信内跳转用） */
+async function openLink(href: string, text: string, doc?: Document) {
+  const s = useApp.getState()
+  // 钓鱼常见手法：显示的是一个网址，点过去是另一个网站
+  const shown = hostIn(text)
+  const real = hostIn(href)
+  if (shown && real && shown !== real && !real.endsWith(`.${shown}`) && !await ask(L(`链接上写的是 ${shown}，实际会打开 ${real}。\n\n可能是钓鱼链接，确定要打开吗？`, `The link says ${shown} but actually opens ${real}.\n\nThis may be a phishing link. Open it anyway?`))) return
+  if (/^mailto:/i.test(href)) {
+    let to = href.slice(7).split('?')[0]
+    try { to = decodeURIComponent(to) } catch { /* 按原样用 */ }
+    s.openCompose('new', null, { prefill: { to } })
+  } else if (/^https?:/i.test(href)) {
+    api.openUrl(href).catch((err) => s.toast(L(`链接打不开：${errText(err)}`, `Couldn't open the link: ${errText(err)}`), { kind: 'err' }))
+  } else if (href.startsWith('#')) {
+    // 信里的「跳到某一段」
+    let id = href.slice(1)
+    try { id = decodeURIComponent(id) } catch { /* 按原样找 */ }
+    const to = id && doc ? doc.getElementById(id) || doc.getElementsByName(id)[0] : null
+    to?.scrollIntoView({ block: 'start' })
+  } else if (href) {
+    // 别的类型（电话、应用专用链接等）不打开，但要说一声，不能点了没动静
+    s.toast(L(`这个链接打不开：${href.slice(0, 80)}`, `This link can't be opened: ${href.slice(0, 80)}`), { kind: 'err' })
+  }
+}
+
+/**
+ * Mac 专用。WebKit 不让父页面在不允许脚本的正文框里收任何事件，点击监听不会被叫到；
+ * 所以 Mac 上让链接自己跳，后端在跳转发出之前拦下来（lib.rs 的 on_navigation），把地址用 mail-link 发过来。
+ * 这里在当前显示的几封信里找到地址相同的链接，拿到它上面的字，再走和 Windows 一样的处理。
+ */
+const linkDocs = new Set<() => Document | null | undefined>()
+/** 不是网页地址的链接（写信、信内跳转等）在 Mac 上包成这个不存在的地址，后端才拦得到；u 里是原来的地址 */
+const MAC_LINK = 'https://link.kojoo.invalid/?u='
+const unwrap = (url: string) => {
+  if (!url.startsWith(MAC_LINK)) return url
+  try { return decodeURIComponent(url.slice(MAC_LINK.length)) } catch { return '' }
+}
+const sameUrl = (a: string, b: string) => { try { return new URL(a).href === new URL(b).href } catch { return a === b } }
+if (IS_MAC) {
+  on<string>('mail-link', (url) => {
+    for (const get of linkDocs) {
+      const hits = Array.from(get()?.querySelectorAll<HTMLAnchorElement>('a[href], area[href]') ?? []).filter((a) => sameUrl(a.href, url))
+      if (!hits.length) continue
+      // 同一个地址出现几处：优先拿「上面写着另一个网址」的那处去做钓鱼提醒
+      const a = hits.find((x) => hostIn(x.textContent || '')) ?? hits[0]
+      openLink(unwrap(url), a.textContent || '', a.ownerDocument)
+      return
+    }
+    openLink(unwrap(url), '')
+  })
+}
+
 const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)
 
 /** 打印：信头 + 正文放进一个临时的隐藏框，调系统打印对话框（不加载远程图片） */
@@ -453,34 +508,14 @@ function MailBody({ m }: { m: MsgFull }) {
   const ro = useRef<ResizeObserver | null>(null)
   useEffect(() => () => ro.current?.disconnect(), [])
 
-  const onClick = async (e: MouseEvent) => {
-    const a = (e.target as Element).closest('a, area')
-    if (!a) return
-    e.preventDefault()
-    let href = (a.getAttribute('href') || '').trim()
-    // 阿里系等邮件常省掉开头的 https:（//host/…）或者只写 www.…：补全了再打开，不然点了没反应
-    if (href.startsWith('//')) href = `https:${href}`
-    else if (/^www\./i.test(href)) href = `https://${href}`
-    // 钓鱼常见手法：显示的是一个网址，点过去是另一个网站
-    const shown = hostIn(a.textContent || '')
-    const real = hostIn(href)
-    if (shown && real && shown !== real && !real.endsWith(`.${shown}`) && !await ask(L(`链接上写的是 ${shown}，实际会打开 ${real}。\n\n可能是钓鱼链接，确定要打开吗？`, `The link says ${shown} but actually opens ${real}.\n\nThis may be a phishing link. Open it anyway?`))) return
-    if (/^mailto:/i.test(href)) {
-      s.openCompose('new', null, { prefill: { to: decodeURIComponent(href.slice(7).split('?')[0]) } })
-    } else if (/^https?:/i.test(href)) {
-      api.openUrl(href).catch((err) => s.toast(L(`链接打不开：${errText(err)}`, `Couldn't open the link: ${errText(err)}`), { kind: 'err' }))
-    } else if (href.startsWith('#')) {
-      // 信里的「跳到某一段」
-      let id = href.slice(1)
-      try { id = decodeURIComponent(id) } catch { /* 按原样找 */ }
-      const d = a.ownerDocument
-      const to = id ? d.getElementById(id) || d.getElementsByName(id)[0] : null
-      to?.scrollIntoView({ block: 'start' })
-    } else if (href) {
-      // 别的类型（电话、应用专用链接等）不打开，但要说一声，不能点了没动静
-      s.toast(L(`这个链接打不开：${href.slice(0, 80)}`, `This link can't be opened: ${href.slice(0, 80)}`), { kind: 'err' })
-    }
-  }
+  // Mac：登记这封信的正文框，后端拦下跳转后靠它找到被点的是哪个链接（见 linkDocs）
+  useEffect(() => {
+    if (!IS_MAC) return
+    const get = () => frame.current?.contentDocument
+    linkDocs.add(get)
+    return () => { linkDocs.delete(get) }
+  }, [])
+
   // 用 iframe 自己的 onLoad（元素一创建就挂上）：在 useEffect 里再挂 load 监听，正文载入快时会错过，点链接就没反应
   const onLoad = () => {
     const d = frame.current?.contentDocument
@@ -490,11 +525,24 @@ function MailBody({ m }: { m: MsgFull }) {
     ro.current?.disconnect()
     ro.current = new ResizeObserver(fit)
     ro.current.observe(d.documentElement)
-    d.addEventListener('click', (e) => { onClickRef.current(e) })
+    if (IS_MAC) {
+      // Mac 的内核（WebKit）不让我们在这个不允许脚本的正文框里收点击事件，下面那个监听根本不会被叫到。
+      // 改成让链接自己跳：去掉 target（带着它点了没反应），地址补全；正文框一发起跳转，后端（lib.rs 的 on_navigation）拦下来发 mail-link。
+      // 后端只收得到网页地址的跳转（实测 mailto: 到不了，# 开头的会把整个程序载进正文框）：不是网页地址的一律包成 MAC_LINK 再带过去
+      d.querySelectorAll('a[href], area[href]').forEach((a) => {
+        a.removeAttribute('target')
+        const h = fullHref(a.getAttribute('href') || '')
+        a.setAttribute('href', /^https?:/i.test(h) ? h : MAC_LINK + encodeURIComponent(h))
+      })
+      return
+    }
+    d.addEventListener('click', (e) => {
+      const a = (e.target as Element).closest('a, area')
+      if (!a) return
+      e.preventDefault()
+      openLink(fullHref(a.getAttribute('href') || ''), a.textContent || '', a.ownerDocument)
+    })
   }
-  // 监听挂在文档上只挂一次，通过 ref 调最新的处理函数
-  const onClickRef = useRef(onClick)
-  onClickRef.current = onClick
 
   if (!m.html) {
     return <>{bar}<div style={{ marginTop: 18, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 'var(--body-size)', lineHeight: 1.75, color: 'var(--ink-2)', userSelect: 'text', maxWidth: 760 }}>{linkify(plain ?? m.text)}</div></>

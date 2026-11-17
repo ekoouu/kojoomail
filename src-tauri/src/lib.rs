@@ -266,6 +266,23 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 wb = wb.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
+                // 邮件正文里的链接：WebKit 不让页面在不允许脚本的正文框里收点击事件，点了以后是正文框自己发起跳转。
+                // 在跳转发出去之前拦下来，把地址交给前端（Reader.tsx 的 mail-link），由它按老规矩处理（防钓鱼提醒、用浏览器打开、写信）。
+                // 为了让跳转能走到这里，Mac 的页面安全策略放开了正文框加载网页地址（tauri.macos.conf.json 的 frame-src，
+                // 不放开的话跳转在到这里之前就被挡掉，实测过）；所以这里是 Mac 上唯一拦着「网页载进程序窗口」的地方，别删、别放宽。
+                // 程序自己的页面是 tauri:// 和 about:srcdoc，照常放行；网页地址一律不放（调试版放行本机的开发服务器）
+                let h = app.handle().clone();
+                wb = wb.on_navigation(move |url| {
+                    let outside = match url.scheme() {
+                        "http" | "https" => !(cfg!(debug_assertions) && url.host_str() == Some("localhost")),
+                        "mailto" => true,
+                        _ => false,
+                    };
+                    if outside {
+                        let _ = tauri::Emitter::emit(&h, "mail-link", url.as_str());
+                    }
+                    !outside
+                });
             }
             // WebView2 参数：在 Tauri 默认值上关掉邮件客户端用不到的后台功能
             #[cfg(windows)]
