@@ -24,7 +24,7 @@ export type Compose = {
   draft?: DraftIn
 }
 export type Toast = { id: number; text: string; kind?: 'err'; action?: { label: string; run: () => void }; ttl?: number }
-export type Page = 'mail' | 'todo' | 'digest' | 'settings'
+export type Page = 'mail' | 'todo' | 'digest' | 'settings' | 'invoices'
 
 const PAGE = 80
 let seq = 0

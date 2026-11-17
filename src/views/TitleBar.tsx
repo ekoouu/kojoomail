@@ -61,7 +61,7 @@ export default function TitleBar({ searchRef }: { searchRef?: React.RefObject<HT
       {accounts.length > 0 ? (
         <form className="search sq" onSubmit={(e) => { e.preventDefault(); doSearch(q) }}>
           <Icon name="search" size={16} />
-          <input ref={ref} value={q} onChange={(e) => setQ(e.target.value)} placeholder={L('搜索邮件、联系人、询盘编号', 'Search mail, contacts, order numbers')} aria-label={L('搜索', 'Search')}
+          <input ref={ref} autoCapitalize="off" autoCorrect="off" spellCheck={false} value={q} onChange={(e) => setQ(e.target.value)} placeholder={L('搜索邮件、联系人、询盘编号', 'Search mail, contacts, order numbers')} aria-label={L('搜索', 'Search')}
             onKeyDown={(e) => { if (e.key === 'Escape') { setQ(''); if (search) doSearch(''); (e.target as HTMLInputElement).blur() } }} />
           {q || search ? (
             <button type="button" className="tb" style={{ width: 22, height: 22 }} aria-label={L('清除搜索', 'Clear search')} onClick={() => { setQ(''); doSearch('') }}><Icon name="x" size={13} /></button>

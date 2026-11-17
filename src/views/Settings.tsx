@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type CSSProperties } from 'react'
 import { ask } from '../lib/ask'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Icon } from '../icons'
 import { useApp } from '../store'
 import { api, errText, FOCUS_CATS, type Account } from '../lib/api'
-import { ACCOUNT_COLORS, ago } from '../lib/format'
+import { ACCOUNT_COLORS, accountLabel, ago, initials } from '../lib/format'
 import { Seg, Switch } from '../ui'
 import { GuideContent } from './Guide'
 import { Rules } from './Rules'
@@ -145,7 +145,7 @@ function General() {
           </div>
           {pm === 'custom' && (
             <div className="gr"><div><div className="lbl">{L('代理地址', 'Proxy address')}</div><div className="sub">{L('HTTP 代理的 主机:端口，比如 Clash 的 127.0.0.1:7890；不支持 SOCKS。代理连不上时会直接提示，不会自动改成直连', 'host:port of an HTTP proxy, e.g. 127.0.0.1:7890 for Clash; SOCKS is not supported. If the proxy is unreachable you get an error instead of a silent direct connection')}</div></div>
-              <input className="field" style={{ width: 190, height: 28, fontSize: 12.5 }} placeholder="127.0.0.1:7890" spellCheck={false} aria-label={L('代理地址', 'Proxy address')} value={pa} onChange={(e) => setPa(e.target.value)} onBlur={commit} onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()} />
+              <input className="field" style={{ width: 190, height: 28, fontSize: 12.5 }} placeholder="127.0.0.1:7890" spellCheck={false} autoCapitalize="off" autoCorrect="off" aria-label={L('代理地址', 'Proxy address')} value={pa} onChange={(e) => setPa(e.target.value)} onBlur={commit} onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()} />
             </div>
           )}
         </div>
@@ -159,27 +159,45 @@ function Accounts() {
   // 每个账号卡片展开没有（2026-11：账号多了一页要滑很久）。记在这台电脑上，下次打开设置还是这个样子
   const [open, setOpenRaw] = useState<Record<number, boolean>>(() => { try { return JSON.parse(localStorage.getItem('kjm.settings.accountsOpen') || '{}') } catch { return {} } })
   const setOpen = (v: Record<number, boolean>) => { setOpenRaw(v); try { localStorage.setItem('kjm.settings.accountsOpen', JSON.stringify(v)) } catch { /* 存不下就只在这次有效 */ } }
+  // 上移 / 下移：和相邻的换位置，侧栏等各处跟着变
+  const move = async (i: number, d: -1 | 1) => {
+    const j = i + d
+    if (j < 0 || j >= s.accounts.length) return
+    const ids = s.accounts.map((a) => a.id)
+    ;[ids[i], ids[j]] = [ids[j], ids[i]]
+    try { await api.accountOrder(ids); await s.refreshMeta() } catch (e) { s.toast(errText(e), { kind: 'err' }) }
+  }
   return (
     <>
       <Head title={L('账号', 'Accounts')} lead={L('每个账号的名称、颜色、签名和登录密码。', 'Name, color, signature and sign-in for each account.')} />
+      {s.accounts.length === 1 && <AccountCard a={s.accounts[0]} />}
       {s.accounts.length > 1 && (
-        <div className="row" style={{ justifyContent: 'flex-end', gap: 6, marginBottom: -8 }}>
-          <button className="btn sm sq" onClick={() => setOpen(Object.fromEntries(s.accounts.map((a) => [a.id, true])))}>{L('全部展开', 'Expand all')}</button>
-          <button className="btn sm sq" onClick={() => setOpen(Object.fromEntries(s.accounts.map((a) => [a.id, false])))}>{L('全部收起', 'Collapse all')}</button>
-        </div>
+        <section>
+          <div className="gh row" style={{ marginRight: 14 }}>
+            <span>{L(`${s.accounts.length} 个账号`, `${s.accounts.length} accounts`)}</span>
+            <span className="row" style={{ marginLeft: 'auto', gap: 2, fontWeight: 400 }}>
+              <button className="btn link sm" onClick={() => setOpen(Object.fromEntries(s.accounts.map((a) => [a.id, true])))}>{L('全部展开', 'Expand all')}</button>
+              <span style={{ color: 'var(--ter)' }}>·</span>
+              <button className="btn link sm" onClick={() => setOpen(Object.fromEntries(s.accounts.map((a) => [a.id, false])))}>{L('全部收起', 'Collapse all')}</button>
+            </span>
+          </div>
+          {/* 多个账号：一张卡片里一行一个，点一行展开它的设置；连不上的那个默认展开（要去修） */}
+          <div className="group sq acct-list">
+            {s.accounts.map((a, i) => {
+              const err = ['error', 'offline'].includes(s.status[a.id]?.state ?? '')
+              const opened = open[a.id] ?? err
+              return <AccountCard key={a.id} a={a} open={opened} onToggle={() => setOpen({ ...open, [a.id]: !opened })}
+                onUp={i > 0 ? () => move(i, -1) : undefined} onDown={i < s.accounts.length - 1 ? () => move(i, 1) : undefined} />
+            })}
+          </div>
+        </section>
       )}
-      {s.accounts.map((a) => {
-        // 只有一个账号时一直展开；多个账号时默认收起，连不上的那个默认展开（要去修）
-        const err = ['error', 'offline'].includes(s.status[a.id]?.state ?? '')
-        const opened = s.accounts.length === 1 || (open[a.id] ?? err)
-        return <AccountCard key={a.id} a={a} open={opened} onToggle={s.accounts.length > 1 ? () => setOpen({ ...open, [a.id]: !opened }) : undefined} />
-      })}
       <div><button className="btn primary sq" onClick={() => s.set({ addAccount: 'pick' })}><Icon name="plus" size={15} />{L('添加账号', 'Add account')}</button></div>
     </>
   )
 }
 
-function AccountCard({ a, open = true, onToggle }: { a: Account; open?: boolean; onToggle?: () => void }) {
+function AccountCard({ a, open = true, onToggle, onUp, onDown }: { a: Account; open?: boolean; onToggle?: () => void; onUp?: () => void; onDown?: () => void }) {
   const s = useApp()
   const st = s.status[a.id]
   const [label, setLabel] = useState(a.label)
@@ -190,17 +208,28 @@ function AccountCard({ a, open = true, onToggle }: { a: Account; open?: boolean;
   useEffect(() => setFocus(a.focus), [a.focus.join('|')])
   const save = async (p: Parameters<typeof api.updateAccount>[1]) => { try { await api.updateAccount(a.id, p); s.refreshMeta() } catch (e) { s.toast(errText(e), { kind: 'err' }) } }
   const state = !st ? L('等待连接', 'Waiting to connect') : st.state === 'idle' ? L(`已同步 · ${st.lastOk ? ago(st.lastOk) : ''}`, `Synced · ${st.lastOk ? ago(st.lastOk) : ''}`) : st.state === 'syncing' ? L('正在同步', 'Syncing') : st.state === 'connecting' ? L('正在连接', 'Connecting') : st.state === 'error' ? st.error : L(`离线：${st.error}`, `Offline: ${st.error}`)
+  const bad = st?.state === 'error' || st?.state === 'offline'
+  const Wrap = onToggle ? 'div' : 'section'
   return (
-    <section className={onToggle && !open ? 'acct-closed' : undefined}>
+    <Wrap className={onToggle ? `acct${open ? ' open' : ''}` : undefined}>
       {onToggle ? (
-        <button className="gh row acct-fold" aria-expanded={open} onClick={onToggle}>
-          <span className={`chev${open ? ' open' : ''}`}><Icon name="right" size={12} /></span>
-          <span className="dot" style={{ background: a.color }} />
-          <span className="truncate">{a.label ? `${a.label} · ${a.email}` : a.email}</span>
-          {!open && <span className="grow truncate" style={{ fontSize: 12, fontWeight: 400, textAlign: 'right', color: st?.state === 'error' || st?.state === 'offline' ? 'var(--accent-text)' : 'var(--ter)' }}>{state}</span>}
+        <div className="acct-row">
+        <button className="acct-head" aria-expanded={open} onClick={onToggle}>
+          <span className="acct-chip" style={{ '--ac': a.color } as CSSProperties}>{initials(a.label, a.email)}</span>
+          <span className="acct-name">
+            <span className="truncate">{accountLabel(a)}</span>
+            {a.label && <span className="truncate sub">{a.email}</span>}
+          </span>
+          <span className={`acct-state${bad ? ' bad' : st?.state === 'idle' || st?.state === 'syncing' ? ' ok' : ''}`}><i /><span className="truncate">{state}</span></span>
+          <span className={`chev${open ? ' open' : ''}`}><Icon name="right" size={13} /></span>
         </button>
+        <span className="acct-move">
+          <button className="btn link sm" disabled={!onUp} onClick={onUp} aria-label={L('上移', 'Move up')} title={L('上移', 'Move up')}><Icon name="up" size={13} /></button>
+          <button className="btn link sm" disabled={!onDown} onClick={onDown} aria-label={L('下移', 'Move down')} title={L('下移', 'Move down')}><Icon name="down" size={13} /></button>
+        </span>
+        </div>
       ) : <h2 className="gh row" style={{ gap: 6 }}><span className="dot" style={{ background: a.color }} />{a.email}</h2>}
-      {open && <div className="group sq">
+      {open && <div className={onToggle ? 'acct-body' : 'group sq'}>
         <div className="gr"><span className="lbl">{L('状态', 'Status')}</span><span style={{ fontSize: 12.5, color: st?.state === 'error' ? 'var(--accent-text)' : 'var(--sec)', maxWidth: 420, textAlign: 'right' }} className="truncate">{state}</span>
           {st?.state === 'error' && <button className="btn sm sq" onClick={() => s.set({ repairAccount: a.id })}>{L('修复', 'Fix')}</button>}
         </div>
@@ -238,7 +267,7 @@ function AccountCard({ a, open = true, onToggle }: { a: Account; open?: boolean;
           }}>{L('删除', 'Remove')}</button>
         </div>
       </div>}
-    </section>
+    </Wrap>
   )
 }
 
@@ -341,7 +370,7 @@ function Ai() {
           </div>
           {preset && (
             <div className="gr"><label className="lbl" htmlFor="ai-base">{L('接口地址', 'API address')}</label>
-              <input id="ai-base" className="field inset mono" style={{ ...COL }} placeholder={preset.id === 'newapi' ? L('https://你的站点域名', 'https://your-site.example') : 'https://…/v1'} value={base} onChange={(e) => setBase(e.target.value)} onBlur={saveBase} />
+              <input id="ai-base" autoCapitalize="off" autoCorrect="off" spellCheck={false} className="field inset mono" style={{ ...COL }} placeholder={preset.id === 'newapi' ? L('https://你的站点域名', 'https://your-site.example') : 'https://…/v1'} value={base} onChange={(e) => setBase(e.target.value)} onBlur={saveBase} />
             </div>
           )}
           {preset && (
@@ -350,7 +379,7 @@ function Ai() {
               <div className="row" style={{ gap: 6, ...COL }}>
                 {/* 显示 / 隐藏按钮放在输入框里，整组和上下的输入框一样宽 */}
                 <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
-                  <input id="ai-key" type={show ? 'text' : 'password'} className="field inset mono" style={{ width: '100%', maxWidth: 'none', paddingRight: 30 }} placeholder={hasKey ? L('已保存，输入新的可替换', 'Saved; type a new one to replace') : 'sk-…'} value={key} onChange={(e) => setKey(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && key.trim() && saveKey()} />
+                  <input id="ai-key" autoCapitalize="off" autoCorrect="off" spellCheck={false} type={show ? 'text' : 'password'} className="field inset mono" style={{ width: '100%', maxWidth: 'none', paddingRight: 30 }} placeholder={hasKey ? L('已保存，输入新的可替换', 'Saved; type a new one to replace') : 'sk-…'} value={key} onChange={(e) => setKey(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && key.trim() && saveKey()} />
                   <button className="tb" style={{ position: 'absolute', right: 2, top: 2, width: 24, height: 24 }} aria-label={show ? L('隐藏', 'Hide') : L('显示', 'Show')} onClick={() => setShow(!show)}><Icon name="eye" size={15} /></button>
                 </div>
                 <button className="btn sm sq" disabled={!key.trim()} onClick={saveKey}>{L('保存', 'Save')}</button>
@@ -373,7 +402,7 @@ function Ai() {
         <div className="group sq">
           {([['aiModel', L('日常分析', 'Everyday'), L('每封新邮件的摘要、分类、待办', 'Summary, category and to-dos for each new email')], ['aiModelFine', L('精细处理', 'Careful'), L('起草回复、点「重新生成」时；空着就用日常分析的', 'Drafting replies and Regenerate; uses the everyday model if empty')], ['aiModelBackup', L('备用', 'Backup'), L('上面的模型连不上时自动切换，可以空着', 'Used automatically when the models above are unreachable; optional')]] as const).map(([k, label, sub]) => (
             <div className="gr" key={k} style={{ minHeight: 52 }}><div><div className="lbl">{label}</div><div className="sub">{sub}</div></div>
-              <input className="field inset mono" list="ai-model-list" style={{ ...COL }} placeholder={choices.length ? L('点击选择或输入', 'Pick or type') : L('模型名', 'Model name')} value={models[k]} onChange={(e) => setModels({ ...models, [k]: e.target.value })} onBlur={() => { if (models[k] !== st[k]) { s.saveSettings({ [k]: models[k].trim() }); if (k === 'aiModel') recheck(!!hasKey, base, models.aiModel) } }} />
+              <input className="field inset mono" list="ai-model-list" autoCapitalize="off" autoCorrect="off" spellCheck={false} style={{ ...COL }} placeholder={choices.length ? L('点击选择或输入', 'Pick or type') : L('模型名', 'Model name')} value={models[k]} onChange={(e) => setModels({ ...models, [k]: e.target.value })} onBlur={() => { if (models[k] !== st[k]) { s.saveSettings({ [k]: models[k].trim() }); if (k === 'aiModel') recheck(!!hasKey, base, models.aiModel) } }} />
             </div>
           ))}
         </div>
@@ -384,6 +413,9 @@ function Ai() {
           {/* 早期的「分析范围 → 不自动分析」（important）和开关是一回事：统一看成关 */}
           <div className="gr"><div><div className="lbl">{L('新邮件到达时自动分析', 'Analyze new mail automatically')}</div>{!(st.aiAuto && st.aiScope !== 'important') && <div className="sub">{L('关着时只在你点「让 AI 分析」、起草回复时调用 AI', 'When off, AI runs only when you click Analyze with AI or draft a reply')}</div>}</div>
             <Switch label={L('自动分析', 'Automatic analysis')} on={st.aiAuto && st.aiScope !== 'important'} onChange={(v) => s.saveSettings({ aiAuto: v, aiScope: v && st.aiScope === 'important' ? 'skip_bulk' : st.aiScope })} />
+          </div>
+          <div className="gr"><div><div className="lbl">{L('从邮件里自动生成待办', 'Create to-dos from emails')}</div><div className="sub">{st.aiTodos ? L('AI 分析邮件时，把需要你办的事列进「待办」', 'When AI analyzes an email, things you need to do go to To-dos') : L('已关闭：AI 不再往「待办」里加东西，只有你自己加的；已有的不受影响', 'Off: AI adds nothing to To-dos, only your own; existing ones stay')}</div></div>
+            <Switch label={L('自动生成待办', 'Create to-dos automatically')} on={st.aiTodos} onChange={(v) => s.saveSettings({ aiTodos: v })} />
           </div>
           {st.aiAuto && st.aiScope !== 'important' && (
             <div className="gr"><span className="lbl">{L('分析范围', 'What to analyze')}</span><Seg small value={st.aiScope} onChange={(v) => s.saveSettings({ aiScope: v })} options={[['all', L('全部', 'Everything')], ['skip_bulk', L('跳过通知和广告', 'Skip notifications & ads')]]} /></div>

@@ -179,7 +179,78 @@ fn v4_rules(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
          );",
     )
 }
-const MIGRATIONS: &[Step] = &[v2_translations, v3_threads, v4_rules];
+/// 数据版本 5：发票台账。invoices 一张发票一行（dedup = 发票号，读不出发票号的用文件内容的指纹）；
+/// invoice_files 是它在各封邮件里的文件（重复收到就有多组），invoice_id 为空的是邮件里的附带材料（行程单、汇总单）；
+/// invoice_scans 记哪些邮件扫过、用的是第几版规则
+pub(crate) fn v5_invoices(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS invoices (\n\
+           id INTEGER PRIMARY KEY,\n\
+           dedup TEXT NOT NULL UNIQUE,\n\
+           number TEXT NOT NULL DEFAULT '',\n\
+           issue_date TEXT NOT NULL DEFAULT '',\n\
+           amount INTEGER,\n\
+           tax INTEGER,\n\
+           seller TEXT NOT NULL DEFAULT '',\n\
+           seller_tax TEXT NOT NULL DEFAULT '',\n\
+           buyer TEXT NOT NULL DEFAULT '',\n\
+           buyer_tax TEXT NOT NULL DEFAULT '',\n\
+           kind TEXT NOT NULL DEFAULT '',\n\
+           source TEXT NOT NULL DEFAULT '',\n\
+           needs_check INTEGER NOT NULL DEFAULT 0,\n\
+           edited INTEGER NOT NULL DEFAULT 0,\n\
+           hidden INTEGER NOT NULL DEFAULT 0,\n\
+           created INTEGER NOT NULL DEFAULT 0\n\
+         );\n\
+         CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(issue_date);\n\
+         CREATE INDEX IF NOT EXISTS idx_invoices_buyer ON invoices(buyer);\n\
+         CREATE TABLE IF NOT EXISTS invoice_files (\n\
+           id INTEGER PRIMARY KEY,\n\
+           invoice_id INTEGER REFERENCES invoices(id) ON DELETE CASCADE,\n\
+           msg_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,\n\
+           account_id INTEGER NOT NULL,\n\
+           att_idx INTEGER NOT NULL,\n\
+           inner TEXT NOT NULL DEFAULT '',\n\
+           name TEXT NOT NULL DEFAULT '',\n\
+           ext TEXT NOT NULL DEFAULT '',\n\
+           role TEXT NOT NULL DEFAULT 'invoice',\n\
+           size INTEGER NOT NULL DEFAULT 0,\n\
+           msg_date INTEGER NOT NULL DEFAULT 0,\n\
+           UNIQUE (msg_id, att_idx, inner)\n\
+         );\n\
+         CREATE INDEX IF NOT EXISTS idx_invoice_files_inv ON invoice_files(invoice_id);\n\
+         CREATE TABLE IF NOT EXISTS invoice_scans (\n\
+           msg_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,\n\
+           ver INTEGER NOT NULL,\n\
+           at INTEGER NOT NULL\n\
+         );",
+    )
+}
+
+/// 数据版本 6：发票项目。invoice_projects 一个项目一行，存的是条件（购买方、销售方、哪几个邮箱、开票日期范围；空 = 不限）；
+/// invoice_project_items 是手动调整：mode 1 = 不符合条件也算进这个项目，0 = 符合条件也不要
+pub(crate) fn v6_invoice_projects(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS invoice_projects (\n\
+           id INTEGER PRIMARY KEY,\n\
+           name TEXT NOT NULL,\n\
+           buyer TEXT,\n\
+           seller TEXT,\n\
+           accounts_json TEXT NOT NULL DEFAULT '[]',\n\
+           date_from TEXT NOT NULL DEFAULT '',\n\
+           date_to TEXT NOT NULL DEFAULT '',\n\
+           created INTEGER NOT NULL DEFAULT 0\n\
+         );\n\
+         CREATE TABLE IF NOT EXISTS invoice_project_items (\n\
+           project_id INTEGER NOT NULL REFERENCES invoice_projects(id) ON DELETE CASCADE,\n\
+           invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,\n\
+           mode INTEGER NOT NULL,\n\
+           PRIMARY KEY (project_id, invoice_id)\n\
+         );",
+    )
+}
+
+const MIGRATIONS: &[Step] = &[v2_translations, v3_threads, v4_rules, v5_invoices, v6_invoice_projects];
 /// 当前代码对应的数据版本
 pub const LATEST: i64 = MIGRATIONS.len() as i64 + 1;
 

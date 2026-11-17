@@ -7,12 +7,11 @@ import { L } from './lib/i18n'
 
 export const isDark = () => document.documentElement.dataset.theme === 'dark'
 
-export function Avatar({ name, email, badge, size }: { name: string; email: string; badge?: string; size?: 'sm' | 'md' }) {
+export function Avatar({ name, email, size }: { name: string; email: string; size?: 'sm' | 'md' }) {
   const [bg, fg] = avatarColors(email || name, isDark())
   return (
     <span className={`avatar${size === 'sm' ? ' sm' : ''}`} style={{ background: bg, color: fg }}>
       {initials(name, email)}
-      {badge && <span className="badge" style={{ background: badge }} />}
     </span>
   )
 }

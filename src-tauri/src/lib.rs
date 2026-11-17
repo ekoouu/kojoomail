@@ -11,6 +11,7 @@ mod assist;
 mod commands;
 mod graph;
 mod i18n;
+mod invoice;
 mod mailbox;
 mod mcp;
 mod mime;
@@ -143,6 +144,10 @@ pub fn run() {
     if std::env::args().any(|a| a == "--mcp") {
         i18n::apply("auto");
         std::process::exit(mcp::run(&data_dir()));
+    }
+    // 读 PDF 文字的子进程（发票台账用，见 invoice::pdf_text）：只把文字打到标准输出就退出，不开窗口、不碰数据
+    if let Some(i) = std::env::args().position(|a| a == "--pdf-text") {
+        std::process::exit(std::env::args().nth(i + 1).map(|p| invoice::pdf_text_main(&p)).unwrap_or(1));
     }
     // 读到设置之前先按系统语言：启动失败的弹窗也能看懂；读到设置后按用户选的
     i18n::apply("auto");
@@ -394,6 +399,7 @@ pub fn run() {
             commands::update_account,
             commands::remove_account,
             commands::retry_account,
+            commands::account_order,
             commands::send_mail,
             commands::precheck_send,
             commands::save_draft,
@@ -406,6 +412,16 @@ pub fn run() {
             commands::todo_set,
             commands::todo_add,
             commands::todo_delete,
+            commands::todo_clear,
+            commands::invoice_list,
+            commands::invoice_detail,
+            commands::invoice_update,
+            commands::invoice_sync,
+            commands::invoice_open,
+            commands::invoice_export,
+            commands::invoice_project_save,
+            commands::invoice_project_delete,
+            commands::invoice_project_item,
             commands::ai_analyze,
             commands::ai_draft,
             commands::ai_rewrite,

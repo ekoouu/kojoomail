@@ -358,7 +358,7 @@ function Recipients({ id, label, list, onChange, extra }: { id?: string; label: 
           <button aria-label={L(`移除 ${a.email}`, `Remove ${a.email}`)} onClick={() => onChange(list.filter((_, j) => j !== i))}><Icon name="x" size={10} /></button>
         </span>
       ))}
-      <input id={id} value={q} aria-label={label} style={{ minWidth: 140, height: 32 }}
+      <input id={id} autoCapitalize="off" autoCorrect="off" spellCheck={false} value={q} aria-label={label} style={{ minWidth: 140, height: 32 }}
         onChange={(e) => { const v = e.target.value; if (/[,;，；]$/.test(v)) { add(parseAddrs(v)) } else setQ(v) }}
         onBlur={() => setTimeout(commit, 150)}
         onPaste={(e) => { const t = e.clipboardData.getData('text'); if (/[,;\n]/.test(t)) { e.preventDefault(); add(parseAddrs(t)) } }}

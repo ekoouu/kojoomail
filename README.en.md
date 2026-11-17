@@ -78,7 +78,7 @@ To-dos the AI pulls out of your emails sit next to the ones you add yourself, gr
 |---|---|
 | **Important** | Emails you starred, plus the ones the AI thinks need attention soon |
 | **Follow up** | Emails you sent more than 3 days ago that haven't had a reply |
-| **Bills & invoices** | Bills, invoices and payment notices from every account in one place |
+| **Invoice ledger** | Invoices attached to your emails in one table: duplicates counted once, filter by buyer or month, export an archive plus a summary sheet; "projects" (conditions on buyer, date range, mailboxes) collect matching invoices automatically and export as a whole |
 | **Snooze** | Put an email away and have it come back at the time you choose |
 | **Conversation view** | Emails from the same thread collapse into one row; open it to read the whole thread in order. Reply, archive and delete still act on a single email (off by default; turn it on in Settings → General) |
 | **Mail rules** | When new mail arrives in the inbox, move it to a folder, archive it, move it to spam, or mark it read or important, based on sender, recipient, subject or attachments. Rules run on your computer; they never delete mail or send anything |

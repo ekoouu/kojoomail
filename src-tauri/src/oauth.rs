@@ -79,6 +79,8 @@ pub struct Grant {
     pub refresh: String,
     pub access: String,
     pub expires: Instant,
+    /// 登录服务器说实际给了哪些权限，空格分隔；没返回就是 None
+    pub scope: Option<String>,
 }
 
 /// 授权结果先放这里，前端拿票据来添加账号（长期授权不经过界面）
@@ -204,7 +206,7 @@ async fn authorize_with(http: &reqwest::Client, provider: &str, sp: &Spec, cid: 
     let mut p = PENDING.lock().unwrap();
     let map = p.get_or_insert_with(HashMap::new);
     map.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(1800));
-    map.insert(ticket.clone(), (Grant { provider: provider.into(), email: email.clone(), refresh, access: t.access, expires: t.expires }, Instant::now()));
+    map.insert(ticket.clone(), (Grant { provider: provider.into(), email: email.clone(), refresh, access: t.access, expires: t.expires, scope: t.scope.clone() }, Instant::now()));
     Ok((ticket, email))
 }
 
@@ -250,6 +252,12 @@ async fn callback(mut sock: TcpStream, state: &str) -> Option<Result<String>> {
     Some(Ok(q["code"].clone()))
 }
 
+/// 谷歌授权页上 Gmail 那一项可以不勾，不勾时只拿到登录身份，令牌连收信会被拒。
+/// 只有 Gmail、且登录服务器返回了权限清单、清单里没有收信权限时才算缺；别的服务商、没返回清单都不算
+pub fn missing_mail_scope(provider: &str, scope: Option<&str>) -> bool {
+    provider == "gmail" && scope.is_some_and(|s| !s.split_whitespace().any(|x| x == "https://mail.google.com/"))
+}
+
 /// 看一眼票据（添加账号验证通过之前不作废，验证失败不用重新授权）
 pub fn peek(ticket: &str) -> Option<Grant> {
     PENDING.lock().unwrap().as_ref()?.get(ticket).map(|x| x.0.clone())
@@ -291,6 +299,7 @@ struct Tokens {
     refresh: Option<String>,
     id_token: Option<String>,
     expires: Instant,
+    scope: Option<String>,
 }
 
 async fn token_call(http: &reqwest::Client, url: &str, form: &[(&str, &str)]) -> Result<Tokens, TokenErr> {
@@ -321,6 +330,7 @@ async fn token_call(http: &reqwest::Client, url: &str, form: &[(&str, &str)]) ->
         refresh: v["refresh_token"].as_str().map(String::from),
         id_token: v["id_token"].as_str().map(String::from),
         expires: Instant::now() + Duration::from_secs(secs.saturating_sub(120).max(60)),
+        scope: v["scope"].as_str().map(String::from),
     })
 }
 
@@ -375,11 +385,16 @@ async fn token_for(http: &reqwest::Client, id: i64, provider: &str, graph: bool)
         }
     }
     let (sp, cid, csecret) = setup(provider)?;
-    let rt = secret::get(&secret::account_key(id)).ok_or_else(|| TokenErr { auth: true, msg: crate::i18n::t("没有找到登录授权，请重新登录", "No sign-in authorization found. Please sign in again.").into() })?;
+    let rt = tokio::task::spawn_blocking(move || secret::read(&secret::account_key(id)))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()))
+        .map_err(|e| TokenErr { auth: false, msg: tr!("暂时读不到系统里保存的登录授权：{e}", "Couldn't read the saved sign-in authorization from the system just now: {e}") })?
+        .ok_or_else(|| TokenErr { auth: true, msg: crate::i18n::t("没有找到登录授权，请重新登录", "No sign-in authorization found. Please sign in again.").into() })?;
     let t = token_call(http, sp.token_url, &refresh_form(provider, &sp, &cid, csecret.as_deref(), &rt, graph)).await?;
     let key = secret::account_key(id);
     // 换令牌期间账号被删了、或者用户刚重新登录过（凭据已不是刚才那个）：别拿旧的覆盖回去
-    if secret::get(&key).as_deref() != Some(rt.as_str()) {
+    // （这一下没读到不算变了：照常把新的长期授权存下来，否则微软换过的授权就丢了）
+    if matches!(secret::read(&key), Ok(v) if v.as_deref() != Some(rt.as_str())) {
         return Ok(t.access);
     }
     if let Some(new_rt) = t.refresh.as_deref().filter(|r| *r != rt) {
@@ -400,6 +415,14 @@ mod tests {
         let ms = B64.encode(br#"{"preferred_username":"me@outlook.com"}"#);
         assert_eq!(email_from_id_token(&format!("h.{ms}.s")).as_deref(), Some("me@outlook.com"));
         assert_eq!(email_from_id_token("garbage"), None);
+    }
+
+    #[test]
+    fn mail_scope_check() {
+        assert!(missing_mail_scope("gmail", Some("openid https://www.googleapis.com/auth/userinfo.email")));
+        assert!(!missing_mail_scope("gmail", Some("https://www.googleapis.com/auth/userinfo.email https://mail.google.com/ openid")));
+        assert!(!missing_mail_scope("gmail", None));
+        assert!(!missing_mail_scope("outlook", Some("openid")));
     }
 
     /// 假的登录服务器：/authorize 直接 302 回本机回调（模拟用户点了同意或拒绝），/token 校验 PKCE 后发令牌

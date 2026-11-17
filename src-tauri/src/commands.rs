@@ -997,7 +997,14 @@ pub struct AccountIn {
 /// `graph`：Outlook 一键登录时给 (http, 长期授权)，发信检查改成确认拿得到 Graph 发信令牌（拿到的令牌返回，留给第一次发信）
 async fn test_inner(a: &AccountIn, auth: Auth, graph: Option<(&reqwest::Client, &str)>) -> Res<Option<(String, std::time::Instant)>> {
     let user = a.username.clone().filter(|u| !u.is_empty()).unwrap_or_else(|| a.email.clone());
-    match mailbox::connect(&a.imap_host, a.imap_port, &user, &auth).await {
+    let mut r = mailbox::connect(&a.imap_host, a.imap_port, &user, &auth).await;
+    if matches!(auth, Auth::Bearer(_)) && matches!(&r, Err(x) if x.auth) {
+        crate::applog::warn("一键登录试连收信被拒，3 秒后再试一次");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        r = mailbox::connect(&a.imap_host, a.imap_port, &user, &auth).await;
+        crate::applog::info(if r.is_ok() { "一键登录试连收信：重试后成功" } else { "一键登录试连收信：重试后仍失败" });
+    }
+    match r {
         Ok(mut s) => {
             let _ = s.logout().await;
         }
@@ -1086,7 +1093,12 @@ async fn credential(ctx: &Ctx, id: i64, auth: &str, provider: &str) -> Res<Auth>
     if auth == "oauth" {
         return oauth::access_token(&ctx.http, id, provider).await.map(Auth::Bearer).map_err(|x| x.msg);
     }
-    secret::get(&secret::account_key(id)).map(Auth::Password).ok_or_else(|| crate::i18n::t("没有找到这个账号的密码", "No password found for this account").to_string())
+    let key = secret::account_key(id);
+    match tokio::task::spawn_blocking(move || secret::read(&key)).await.unwrap_or_else(|e| Err(e.to_string())) {
+        Ok(Some(p)) => Ok(Auth::Password(p)),
+        Ok(None) => Err(crate::i18n::t("没有找到这个账号的密码", "No password found for this account").to_string()),
+        Err(e) => Err(tr!("暂时读不到系统里保存的密码，请稍后再试：{e}", "Couldn't read the saved password from the system just now. Please try again shortly: {e}")),
+    }
 }
 
 #[tauri::command]
@@ -1129,6 +1141,12 @@ async fn add_account_inner(ctx: State<'_, Arc<Ctx>>, input: AccountIn) -> Res<i6
         let st = ctx.store.lock().unwrap();
         if st.conn.query_row("SELECT id FROM accounts WHERE email=?", [&email], |r| r.get::<_, i64>(0)).optional().map_err(e)?.is_some() {
             return Err(tr!("{email} 已经添加过了", "{email} has already been added"));
+        }
+    }
+    if let Some(g) = &grant {
+        crate::applog::info(&format!("{} 一键登录拿到的权限：{}", g.provider, g.scope.as_deref().unwrap_or("（登录服务器没有返回）")));
+        if oauth::missing_mail_scope(&g.provider, g.scope.as_deref()) {
+            return Err(crate::i18n::t("没有拿到 Gmail 权限，请重新登录，并在谷歌授权页勾上「读取、撰写、发送 Gmail 邮件」那一项。", "Kojoo Mail didn't get access to Gmail. Please sign in again and tick the box for reading, composing and sending Gmail on Google's permission page.").into());
         }
     }
     input.email = email.clone();
@@ -1284,6 +1302,18 @@ pub async fn retry_account(ctx: State<'_, Arc<Ctx>>, id: i64) -> Res<()> {
     if let Some(w) = ctx.workers.lock().unwrap().get(&id) {
         w.retry();
     }
+    Ok(())
+}
+
+/// 只改排序号，账号列表各处都按 sort, id 排
+#[tauri::command]
+pub async fn account_order(ctx: State<'_, Arc<Ctx>>, ids: Vec<i64>) -> Res<()> {
+    let st = ctx.store.lock().unwrap();
+    let tx = st.conn.unchecked_transaction().map_err(e)?;
+    for (i, id) in ids.iter().enumerate() {
+        st.conn.execute("UPDATE accounts SET sort=? WHERE id=?", params![i as i64 + 1, id]).map_err(e)?;
+    }
+    tx.commit().map_err(e)?;
     Ok(())
 }
 
@@ -1658,6 +1688,122 @@ pub async fn open_url(url: String) -> Res<()> {
     Ok(())
 }
 
+// ---------------- 发票台账 ----------------
+
+#[tauri::command]
+pub async fn invoice_list(ctx: State<'_, Arc<Ctx>>, filter: crate::invoice::Filter) -> Res<crate::invoice::Listing> {
+    let st = ctx.store.lock().unwrap();
+    crate::invoice::list(&st.conn, &filter).map_err(e)
+}
+
+#[tauri::command]
+pub async fn invoice_detail(ctx: State<'_, Arc<Ctx>>, id: i64) -> Res<Option<crate::invoice::Detail>> {
+    let st = ctx.store.lock().unwrap();
+    crate::invoice::detail(&st.conn, id).map_err(e)
+}
+
+/// 手工改一张发票（发票号、日期、金额、销售方、购买方）或者隐藏 / 恢复它
+#[tauri::command]
+pub async fn invoice_update(ctx: State<'_, Arc<Ctx>>, id: i64, patch: crate::invoice::Patch) -> Res<()> {
+    let ok = {
+        let st = ctx.store.lock().unwrap();
+        crate::invoice::update(&st.conn, id, &patch).map_err(e)?
+    };
+    if !ok {
+        return Err(crate::i18n::t("这个发票号已经有一张了", "Another invoice already has this number").into());
+    }
+    let _ = ctx.app.emit("invoice-changed", serde_json::json!({ "kind": "row" }));
+    Ok(())
+}
+
+/// 把还没看过的邮件在后台扫一遍（打开发票台账时调）。返回还要扫几封
+#[tauri::command]
+pub async fn invoice_sync(ctx: State<'_, Arc<Ctx>>) -> Res<usize> {
+    crate::invoice::sync(&ctx).map_err(e)
+}
+
+/// 打开台账里的一个文件：解到临时目录交给系统默认程序。只开 PDF 和 OFD（XML 是数据文件，导出时带上）
+#[tauri::command]
+pub async fn invoice_open(ctx: State<'_, Arc<Ctx>>, file_id: i64) -> Res<()> {
+    let ctx = ctx.inner().clone();
+    tokio::task::spawn_blocking(move || -> Res<()> {
+        let (name, data) = crate::invoice::file_bytes(&ctx.store, file_id).map_err(e)?;
+        let ext = std::path::Path::new(&name).extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
+        // 只开真的 PDF 和 OFD：后缀要对，内容开头也要对（改了后缀的脚本、程序不开）
+        let real = match ext.as_str() {
+            "pdf" => data.starts_with(b"%PDF"),
+            "ofd" => data.starts_with(b"PK"),
+            _ => false,
+        };
+        if !real {
+            return Err(crate::i18n::t("这个文件不直接打开，导出后在压缩包里看", "This file isn't opened directly; find it in the exported archive").into());
+        }
+        let dir = std::env::temp_dir().join("KojooMail").join("invoice").join(file_id.to_string());
+        std::fs::create_dir_all(&dir).map_err(e)?;
+        // 名字截短在「去掉后缀的那一段」上做，再把后缀接回去：落盘的文件一定以 .pdf / .ofd 结尾
+        let stem = std::path::Path::new(&name).file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+        let target = dir.join(format!("{}.{ext}", crate::invoice::safe_name(&stem, 100)));
+        if let Err(err) = std::fs::write(&target, &data) {
+            // 写不进去多半是上次打开的还被阅读器占着：内容一样才接着用那份，不一样就报错
+            if std::fs::read(&target).ok().as_deref() != Some(&data[..]) {
+                return Err(e(err));
+            }
+        }
+        mark_from_internet(&target);
+        crate::os::open_path(&target).map_err(e)
+    })
+    .await
+    .map_err(e)?
+}
+
+/// 把选中的发票导出成压缩包（发票文件 + 汇总表），存到「下载」并在文件夹里选中。返回 [路径, 没取到的文件数]
+#[tauri::command]
+pub async fn invoice_export(ctx: State<'_, Arc<Ctx>>, ids: Vec<i64>, label: Option<String>) -> Res<(String, usize)> {
+    let ctx = ctx.inner().clone();
+    tokio::task::spawn_blocking(move || -> Res<(String, usize)> {
+        let (name, data, missing) = crate::invoice::export(&ctx.store, &ids, label.as_deref().unwrap_or("")).map_err(e)?;
+        Ok((save_to_downloads(&name, &data)?, missing))
+    })
+    .await
+    .map_err(e)?
+}
+
+/// 新建（id = 0）或修改一个发票项目，返回编号
+#[tauri::command]
+pub async fn invoice_project_save(ctx: State<'_, Arc<Ctx>>, project: crate::invoice::Project) -> Res<i64> {
+    let id = {
+        let st = ctx.store.lock().unwrap();
+        crate::invoice::save_project(&st.conn, &project).map_err(e)?
+    };
+    let id = id.ok_or(if project.name.trim().is_empty() { crate::i18n::t("项目要有个名字", "The project needs a name") } else { crate::i18n::t("这个项目已经不在了", "This project no longer exists") })?;
+    let _ = ctx.app.emit("invoice-changed", serde_json::json!({ "kind": "row" }));
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn invoice_project_delete(ctx: State<'_, Arc<Ctx>>, id: i64) -> Res<()> {
+    {
+        let st = ctx.store.lock().unwrap();
+        crate::invoice::delete_project(&st.conn, id).map_err(e)?;
+    }
+    let _ = ctx.app.emit("invoice-changed", serde_json::json!({ "kind": "row" }));
+    Ok(())
+}
+
+/// 手动把一张发票加进项目（add）、移出（remove）、撤掉手动调整（reset）
+#[tauri::command]
+pub async fn invoice_project_item(ctx: State<'_, Arc<Ctx>>, project: i64, invoice: i64, action: String) -> Res<()> {
+    let ok = {
+        let st = ctx.store.lock().unwrap();
+        crate::invoice::project_item(&st.conn, project, invoice, &action).map_err(e)?
+    };
+    if !ok {
+        return Err(crate::i18n::t("不认识的操作", "Unknown action").into());
+    }
+    let _ = ctx.app.emit("invoice-changed", serde_json::json!({ "kind": "row" }));
+    Ok(())
+}
+
 // ---------------- 待办 ----------------
 
 #[tauri::command]
@@ -1717,6 +1863,33 @@ pub async fn todo_add(ctx: State<'_, Arc<Ctx>>, text: String, due: Option<i64>, 
     drop(st);
     changed(&ctx);
     Ok(id)
+}
+
+/// 一键清除待办。scope：done 已完成的 | ai AI 自动生成、还没办的 | all 全部。返回清掉几条。
+/// AI 从邮件里提取的那些不真删，留一个看不见的记号（done=2），这封信再被分析时不会又冒出来；手动加的真删
+#[tauri::command]
+pub async fn todo_clear(ctx: State<'_, Arc<Ctx>>, scope: String) -> Res<usize> {
+    let n = {
+        let st = ctx.store.lock().unwrap();
+        clear_todos(&st.conn, &scope).map_err(e)?.ok_or(crate::i18n::t("不认识的清除范围", "Unknown scope"))?
+    };
+    changed(&ctx);
+    Ok(n)
+}
+
+/// 清除待办的数据库部分（两句在一个事务里）。范围不认识返回 None
+pub(crate) fn clear_todos(conn: &rusqlite::Connection, scope: &str) -> rusqlite::Result<Option<usize>> {
+    let wh = match scope {
+        "done" => "done=1",
+        "ai" => "done=0 AND source='ai'",
+        "all" => "done<2",
+        _ => return Ok(None),
+    };
+    let tx = conn.unchecked_transaction()?;
+    let a = tx.execute(&format!("UPDATE todos SET done=2, done_at=?1 WHERE {wh} AND source='ai' AND msg_id IS NOT NULL"), [now()])?;
+    let b = tx.execute(&format!("DELETE FROM todos WHERE {wh}"), [])?;
+    tx.commit()?;
+    Ok(Some(a + b))
 }
 
 #[tauri::command]

@@ -1,10 +1,11 @@
 import { Fragment, useEffect, useState } from 'react'
 import { Icon } from '../icons'
+import { ask } from '../lib/ask'
 import { useApp } from '../store'
 import { api, errText, on, type Todo } from '../lib/api'
 import { dueLabel } from '../lib/format'
 import { Empty, Seg, useMenu } from '../ui'
-import { L } from '../lib/i18n'
+import { L, plural } from '../lib/i18n'
 
 function bucket(t: Todo) {
   if (t.done) return '已完成'
@@ -43,6 +44,18 @@ export default function TodoPage() {
   const overdue = (list || []).filter((t) => bucket(t) === '逾期').length
   const sorted = [...(list || [])].sort((a, b) => ORDER.indexOf(bucket(a)) - ORDER.indexOf(bucket(b)))
 
+  // 一键清除：先问一句再清（清掉的找不回来）
+  const clear = async (scope: 'done' | 'ai' | 'all', what: string) => {
+    if (!await ask(L(`清除${what}？不管现在看的是哪个页签，都按全部待办算。清掉后找不回来。`, `Clear ${what}? This covers all to-dos, whichever tab you're on, and can't be undone.`))) return
+    try { const n = await api.todoClear(scope); setSel(null); load(); s.refreshMeta(); s.toast(n ? L(`已清除 ${n} 项待办`, `${plural(n, '', 'to-do')} cleared`) : L('没有可清除的', 'Nothing to clear')) } catch (e) { s.toast(errText(e), { kind: 'err' }) }
+  }
+  const clearMenu = (el: HTMLElement) => menu.openBelow(el, [
+    { label: L('清除已完成的', 'Clear completed'), run: () => clear('done', L('全部已完成的待办', 'all completed to-dos')) },
+    { label: L('清除 AI 自动生成的', 'Clear AI-generated'), run: () => clear('ai', L('AI 自动生成、还没办的待办（自己加的不动）', 'the open to-dos AI generated (your own stay)')) },
+    'sep',
+    { label: L('清除全部待办', 'Clear all to-dos'), run: () => clear('all', L('全部待办（包括没办完的和自己加的）', 'all to-dos, including open ones and your own')) },
+  ])
+
   const dueMenu = (el: HTMLElement, t: Todo) => menu.openBelow(el, [
     { label: L('今天', 'Today'), run: () => set(t.id, { due: dueAt(0) }) },
     { label: L('明天', 'Tomorrow'), run: () => set(t.id, { due: dueAt(1) }) },
@@ -67,13 +80,17 @@ export default function TodoPage() {
               try { await api.todoAdd(newText, null, null); setNewText(''); load(); s.refreshMeta() } catch (er) { s.toast(errText(er), { kind: 'err' }) }
             }}>
               <input className="field inset" style={{ width: 220, maxWidth: '100%' }} placeholder={L('新建待办，回车添加', 'New to-do, press Enter to add')} value={newText} onChange={(e) => setNewText(e.target.value)} aria-label={L('新建待办', 'New to-do')} />
+              <button type="button" className="btn sq" onClick={(e) => clearMenu(e.currentTarget)}><Icon name="trash" size={15} />{L('清除', 'Clear')}</button>
             </form>
           </div>
         </div>
         <div className="rows" style={{ padding: '0 12px 20px' }}>
           {list && list.length === 0 ? (
-            <Empty icon="todo" title={filter === 'done' ? L('还没有完成的待办', 'No completed to-dos yet') : L('没有待办', 'No to-dos')} sub={s.aiConfigured ? <>{L('AI 会从需要你处理的邮件里自动提取，', 'AI pulls them from emails that need your action,')}<br />{L('也可以在上面直接新建', 'or add one above')}</> : <>{L('可以在上面直接新建。', 'Add one above.')}<br />{L('设置 AI 后，还会从邮件里自动提取', 'Set up AI and they\'ll also be pulled from your email')}</>}>
+            <Empty icon="todo" title={filter === 'done' ? L('还没有完成的待办', 'No completed to-dos yet') : L('没有待办', 'No to-dos')} sub={!s.aiConfigured ? <>{L('可以在上面直接新建。', 'Add one above.')}<br />{L('设置 AI 后，还会从邮件里自动提取', 'Set up AI and they\'ll also be pulled from your email')}</>
+              : s.settings?.aiTodos === false ? <>{L('可以在上面直接新建。', 'Add one above.')}<br />{L('「从邮件里自动生成待办」已关闭，可以在 设置 → AI 与模型 里打开', '"Create to-dos from emails" is off; turn it on under Settings → AI & models')}</>
+              : <>{L('AI 会从需要你处理的邮件里自动提取，', 'AI pulls them from emails that need your action,')}<br />{L('也可以在上面直接新建', 'or add one above')}</>}>
               {!s.aiConfigured && <button className="btn sm sq" onClick={s.openAiSettings}>{L('去设置 AI', 'Set up AI')}</button>}
+              {s.aiConfigured && s.settings?.aiTodos === false && <button className="btn sm sq" onClick={s.openAiSettings}>{L('去设置', 'Open settings')}</button>}
             </Empty>
           ) : sorted.map((t, i) => {
             const b = bucket(t)

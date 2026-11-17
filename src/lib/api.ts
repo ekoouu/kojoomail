@@ -19,14 +19,14 @@ export type Account = {
 export const FOCUS_CATS = ['询盘', '待办', '账单', '通知', '订阅', '个人'] as const
 export type Folder = { id: number; accountId: number; path: string; name: string; role: string; unread: number; total: number }
 export type Status = {
-  accountId: number; state: 'connecting' | 'syncing' | 'idle' | 'error' | 'offline' | ''; error: string; errorKind: '' | 'auth' | 'network'
+  accountId: number; state: 'connecting' | 'syncing' | 'idle' | 'error' | 'offline' | ''; error: string; errorKind: '' | 'auth' | 'network' | 'store'
   lastOk: number; fails: number; progressDone: number; progressTotal: number; log: string[]
 }
 export type Settings = {
   theme: 'system' | 'light' | 'dark'; fontSize: number; density: 'compact' | 'standard' | 'cozy'; serifTitles: boolean
   autostart: boolean; closeToTray: boolean; defaultAccount: number | null; notify: 'important' | 'all' | 'none'
   remoteImages: 'ask' | 'always'; undoSendSecs: number
-  notifyPreview: boolean; aiProvider: string; aiBase: string; aiModel: string; aiModelFine: string; aiModelBackup: string; aiAuto: boolean; aiScope: 'skip_bulk' | 'all' | 'important'; aiDailyLimit: number
+  notifyPreview: boolean; aiProvider: string; aiBase: string; aiModel: string; aiModelFine: string; aiModelBackup: string; aiAuto: boolean; aiTodos: boolean; aiScope: 'skip_bulk' | 'all' | 'important'; aiDailyLimit: number
   /** 自定义要求：追加到批注、起草回复、跟进邮件的提示词末尾 */
   aiCustom: string
   language: 'auto' | 'zh' | 'en'
@@ -37,6 +37,15 @@ export type Settings = {
   /** 允许外部 AI Agent 通过 MCP 只读本机邮件（默认关） */
   mcpRead: boolean
 }
+/** 发票台账的筛选：购买方 / 销售方传空字符串 = 没读出来的那些；日期是开票日期 YYYY-MM-DD */
+export type InvoiceFilter = { buyer?: string; seller?: string; accountId?: number; from?: string; to?: string; q?: string; onlyCheck?: boolean; hidden?: boolean; project?: number }
+/** 发票项目：存下来的一组条件（buyer / seller 不填 = 不限，空字符串 = 没读出来的；accounts 空 = 全部邮箱；from / to 是开票日期），符合的发票自动归进来。count / total 是现在项目里的张数和合计（分） */
+export type InvoiceProject = { id: number; name: string; buyer?: string | null; seller?: string | null; accounts: number[]; from: string; to: string; count: number; total: number }
+/** 一张发票。金额单位是分；mails > 1 = 重复收到过（只算一张）；source 是信息读自哪种文件 */
+export type InvoiceRow = { id: number; number: string; date: string; amount: number | null; tax: number | null; seller: string; buyer: string; kind: string; source: 'xml' | 'ofd' | 'pdf' | string; needsCheck: boolean; edited: boolean; hidden: boolean; mails: number; accounts: number[]; hasPdf: boolean }
+export type InvoiceListing = { items: InvoiceRow[]; count: number; total: number; noAmount: number; buyers: [string, number][]; sellers: [string, number][]; accounts: [number, number][]; months: [string, number][]; all: number; check: number; hidden: number; projects: InvoiceProject[] }
+export type InvoiceFile = { id: number; name: string; ext: string; size: number; msgId: number; role: 'invoice' | 'extra' }
+export type InvoiceDetail = { sellerTax: string; buyerTax: string; files: InvoiceFile[]; extras: InvoiceFile[]; mails: { msgId: number; accountId: number; subject: string; from: string; date: number }[] }
 export type Counts = { inboxUnread: number; important: number; todos: number; later: number; drafts: number; bills: number; followups: number }
 export type CatCount = { cat: string; total: number; unread: number }
 export type Boot = { accounts: Account[]; folders: Folder[]; settings: Settings; status: Status[]; aiConfigured: boolean; aiUsedToday: number; counts: Counts; version: string; oauth: string[]; lang: 'zh' | 'en'; exePath?: string }
@@ -112,6 +121,7 @@ export const api = {
   oauthCancel: () => call<void>('oauth_cancel'),
   removeAccount: (id: number) => call<void>('remove_account', { id }),
   retryAccount: (id: number) => call<void>('retry_account', { id }),
+  accountOrder: (ids: number[]) => call<void>('account_order', { ids }),
   send: (d: DraftIn) => call<void>('send_mail', { d }),
   saveDraft: (d: DraftIn) => call<number>('save_draft', { d }),
   drafts: () => call<Draft[]>('list_drafts'),
@@ -128,6 +138,21 @@ export const api = {
     call<void>('todo_set', { id, done: p.done ?? null, text: p.text ?? null, due: p.due ?? null, clearDue: 'due' in p && p.due === null, priority: p.priority ?? null }),
   todoAdd: (text: string, due: number | null, msgId: number | null) => call<number>('todo_add', { text, due, msgId }),
   todoDelete: (id: number) => call<void>('todo_delete', { id }),
+  todoClear: (scope: 'done' | 'ai' | 'all') => call<number>('todo_clear', { scope }),
+  // 发票台账
+  invoiceList: (filter: InvoiceFilter) => call<InvoiceListing>('invoice_list', { filter }),
+  invoiceDetail: (id: number) => call<InvoiceDetail | null>('invoice_detail', { id }),
+  invoiceUpdate: (id: number, patch: { number?: string; date?: string; amount?: string; seller?: string; buyer?: string; hidden?: boolean }) => call<void>('invoice_update', { id, patch }),
+  /** 把还没看过的邮件在后台扫一遍，返回还要扫几封 */
+  invoiceSync: () => call<number>('invoice_sync'),
+  invoiceOpen: (fileId: number) => call<void>('invoice_open', { fileId }),
+  /** 导出成压缩包，返回 [存到哪了, 没取到的文件数] */
+  invoiceExport: (ids: number[], label?: string) => call<[string, number]>('invoice_export', { ids, label: label ?? null }),
+  /** 新建（id = 0）或修改一个发票项目，返回它的编号 */
+  invoiceProjectSave: (project: Omit<InvoiceProject, 'count' | 'total'>) => call<number>('invoice_project_save', { project }),
+  invoiceProjectDelete: (id: number) => call<void>('invoice_project_delete', { id }),
+  /** 手动把一张发票加进项目（add）、移出（remove）、撤掉手动调整（reset） */
+  invoiceProjectItem: (project: number, invoice: number, action: 'add' | 'remove' | 'reset') => call<void>('invoice_project_item', { project, invoice, action }),
   aiAnalyze: (id: number) => call<void>('ai_analyze', { id }),
   aiDraft: (id: number, tone: string, lang: string, hint: string) => call<string>('ai_draft', { id, tone, lang, hint }),
   aiRewrite: (text: string, op: string, arg: string) => call<string>('ai_rewrite', { text, op, arg }),

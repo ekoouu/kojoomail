@@ -301,7 +301,8 @@ async fn analyze(ctx: &Arc<Ctx>, id: i64, force: bool) -> Result<()> {
         text::sanitize_for_llm(&body)
     );
     let models = if force { vec![s.ai_model_fine.clone(), s.ai_model.clone(), s.ai_model_backup.clone()] } else { vec![s.ai_model.clone(), s.ai_model_backup.clone()] };
-    let r = if classify { chat_json(ctx, &models, &with_lang(CLASSIFY), &user, 400).await } else { chat_json(ctx, &models, &with_custom(&with_lang(SYSTEM), &s.ai_custom), &user, 1200).await };
+    let r = if classify { chat_json(ctx, &models, &with_lang(CLASSIFY), &user, 400).await } else { chat_json(ctx, &models, &with_custom(&with_lang(&if s.ai_todos { SYSTEM.to_string() } else { format!("{SYSTEM}\n- 用户关闭了待办提取：todos 一律返回 []") }), &s.ai_custom), &user, 1200).await };
+    let todos_on = settings::load(ctx).ai_todos;
     let st = ctx.store.lock().unwrap();
     st.ai_count_up()?;
     match r {
@@ -355,7 +356,10 @@ async fn analyze(ctx: &Arc<Ctx>, id: i64, force: bool) -> Result<()> {
                  VALUES(?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![id, get("summary"), category, priority, get("reason"), serde_json::to_string(&facts)?, get("reply"), get("reply_lang"), model, now()],
             )?;
-            write_ai_todos(&st.conn, id, m.account_id, &priority, &m.subject, if m.from_name.is_empty() { &m.from_addr } else { &m.from_name }, &v)?;
+            // 设置里关了「自动生成待办」就不提取（已有的不动）
+            if todos_on {
+                write_ai_todos(&st.conn, id, m.account_id, &priority, &m.subject, if m.from_name.is_empty() { &m.from_addr } else { &m.from_name }, &v)?;
+            }
             drop(st);
             let _ = ctx.app.emit("ai-state", serde_json::json!({ "msgId": id, "state": "done" }));
             finish_notify(ctx, id, Some((priority.as_str(), category.as_str(), get("summary"))));
@@ -626,6 +630,27 @@ mod tests {
             c.execute("UPDATE todos SET done=2 WHERE id=(SELECT MIN(id) FROM todos WHERE msg_id=2)", []).unwrap();
             assert!(!write_ai_todos(c, 2, 1, "normal", "S", "x", &v).unwrap());
             assert_eq!(count(2), 2);
+            // 一键清除：先各摆一条手动加的（一条没办、一条办完）
+            c.execute("INSERT INTO todos(text, priority, source, created, done) VALUES('手动没办', 'normal', 'manual', 0, 0), ('手动办完', 'normal', 'manual', 0, 1), ('来源邮件没了的 AI 待办', 'normal', 'ai', 0, 1)", []).unwrap();
+            let shown = || -> i64 { c.query_row("SELECT COUNT(*) FROM todos WHERE done<2", [], |r| r.get(0)).unwrap() };
+            let all = || -> i64 { c.query_row("SELECT COUNT(*) FROM todos", [], |r| r.get(0)).unwrap() };
+            assert_eq!(crate::commands::clear_todos(c, "乱写").unwrap(), None);
+            // 清已完成：有来源邮件的 AI 待办留记号；手动办完的、来源邮件已经不在的 AI 待办真删；没办的都不动
+            let (s0, a0) = (shown(), all());
+            assert_eq!(crate::commands::clear_todos(c, "done").unwrap(), Some(3));
+            assert_eq!((shown(), all()), (s0 - 3, a0 - 2));
+            let manual_open: i64 = c.query_row("SELECT COUNT(*) FROM todos WHERE source='manual' AND done=0", [], |r| r.get(0)).unwrap();
+            assert_eq!(manual_open, 1);
+            // 清 AI 生成的：只动 AI 没办的，手动没办的还在
+            let ai_open: i64 = c.query_row("SELECT COUNT(*) FROM todos WHERE done=0 AND source='ai'", [], |r| r.get(0)).unwrap();
+            assert_eq!(crate::commands::clear_todos(c, "ai").unwrap(), Some(ai_open as usize));
+            assert_eq!(shown(), 1);
+            // 清全部：一条看得见的都不剩；清过的邮件重新分析不会又冒出来
+            assert_eq!(crate::commands::clear_todos(c, "all").unwrap(), Some(1));
+            assert_eq!(shown(), 0);
+            assert!(!write_ai_todos(c, 1, 1, "normal", "S", "x", &v).unwrap());
+            assert!(!write_ai_todos(c, 2, 1, "normal", "S", "x", &v).unwrap());
+            assert_eq!(shown(), 0);
         }
         let _ = std::fs::remove_dir_all(&d);
     }

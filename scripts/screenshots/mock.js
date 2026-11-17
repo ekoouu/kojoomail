@@ -110,7 +110,7 @@
     aiPending: false, todos: todos.filter((x) => x.msgId === m.id),
   })
 
-  const settings = { theme: 'light', fontSize: 13, density: 'standard', serifTitles: true, autostart: false, closeToTray: true, defaultAccount: 1, notify: 'important', remoteImages: 'ask', undoSendSecs: 5, notifyPreview: true, aiProvider: 'deepseek', aiBase: 'https://api.deepseek.com/v1', aiModel: 'deepseek-v4-flash', aiModelFine: '', aiModelBackup: '', aiAuto: true, aiScope: 'skip_bulk', aiDailyLimit: 200, language: EN ? 'en' : 'zh' }
+  const settings = { theme: 'light', fontSize: 13, density: 'standard', serifTitles: true, autostart: false, closeToTray: true, defaultAccount: 1, notify: 'important', remoteImages: 'ask', undoSendSecs: 5, notifyPreview: true, aiProvider: 'deepseek', aiBase: 'https://api.deepseek.com/v1', aiModel: 'deepseek-v4-flash', aiModelFine: '', aiModelBackup: '', aiAuto: true, aiTodos: true, aiScope: 'skip_bulk', aiDailyLimit: 200, language: EN ? 'en' : 'zh' }
   if (window.__DEMO_THEME__) settings.theme = window.__DEMO_THEME__
   const counts = { inboxUnread: 12, important: 5, todos: todos.length, later: 2, drafts: 1, bills: 2, followups: 3 }
   const status = accounts.map((a) => ({ accountId: a.id, state: 'idle', error: '', errorKind: '', lastOk: t(60e3), fails: 0, progressDone: 0, progressTotal: 0, log: [] }))
@@ -138,6 +138,41 @@
     },
     get_message: ({ id }) => full(msgs.find((m) => m.id === id)),
     list_todos: ({ filter }) => (filter === 'done' ? [] : todos),
+    todo_clear: () => 0,
+    // 发票台账：全是虚构的公司和号码
+    invoice_sync: () => 0,
+    invoice_list: ({ filter }) => {
+      const B1 = X('光屿家居（杭州）有限公司', 'Lumen Home (Hangzhou) Co., Ltd.'), B2 = X('杭州知夏贸易有限公司', 'Hangzhou Zhixia Trading Co., Ltd.')
+      const all = [
+        { id: 1, number: '26332000001234567801', date: '2026-11-14', amount: 268000, tax: 15170, seller: X('杭州云栖酒店管理有限公司', 'Yunqi Hotel Management Co., Ltd.'), buyer: B1, kind: X('普通发票', 'General invoice'), source: 'xml', mails: 1, accounts: [2] },
+        { id: 2, number: '26332000001234567802', date: '2026-11-12', amount: 39840, tax: 2255, seller: X('迅行出行科技有限公司', 'Swift Ride Technology Co., Ltd.'), buyer: B1, kind: X('普通发票', 'General invoice'), source: 'xml', mails: 2, accounts: [1, 2] },
+        { id: 3, number: '26332000001234567803', date: '2026-11-10', amount: 12650, tax: 368, seller: X('浙江沪杭高速公路有限公司', 'Zhejiang Huhang Expressway Co., Ltd.'), buyer: B1, kind: X('通行费', 'Toll'), source: 'xml', mails: 1, accounts: [2] },
+        { id: 4, number: '26332000001234567804', date: '2026-11-10', amount: 8800, tax: 256, seller: X('浙江沪杭高速公路有限公司', 'Zhejiang Huhang Expressway Co., Ltd.'), buyer: B1, kind: X('通行费', 'Toll'), source: 'xml', mails: 1, accounts: [2] },
+        { id: 5, number: '26332000001234567805', date: '2026-11-08', amount: 1580000, tax: 181770, seller: X('宁波竹语包装材料有限公司', 'Ningbo Bamboo Packaging Co., Ltd.'), buyer: B2, kind: X('增值税专用发票', 'Special VAT invoice'), source: 'ofd', mails: 1, accounts: [1] },
+        { id: 6, number: '', date: '2026-11-05', amount: null, tax: null, seller: X('上海南站餐饮服务有限公司', 'Shanghai South Station Catering Co., Ltd.'), buyer: '', kind: '', source: 'pdf', mails: 1, accounts: [3] },
+        { id: 7, number: '26332000001234567807', date: '2026-10-28', amount: 56000, tax: 3170, seller: X('杭州印象快印有限公司', 'Hangzhou Impression Printing Co., Ltd.'), buyer: B2, kind: X('普通发票', 'General invoice'), source: 'pdf', mails: 1, accounts: [1] },
+      ].map((r) => ({ needsCheck: !r.number || r.amount == null || !r.buyer, edited: false, hidden: false, hasPdf: true, ...r }))
+      const f = filter || {}
+      const inProject = (r, pid) => (pid === 1 ? r.buyer === B1 && r.date >= '2026-11-01' : pid === 2 ? r.buyer === B2 : true)
+      const items = all.filter((r) => (f.buyer === undefined || r.buyer === f.buyer) && (f.seller === undefined || r.seller === f.seller) && (!f.accountId || r.accounts.includes(f.accountId))
+        && (!f.from || r.date >= f.from) && (!f.to || r.date <= f.to) && (!f.onlyCheck || r.needsCheck) && (!f.q || (r.number + r.seller + r.buyer).includes(f.q)) && !f.hidden && inProject(r, f.project))
+      const count = (k) => Object.entries(all.reduce((m, r) => ((m[k(r)] = (m[k(r)] || 0) + 1), m), {})).sort((a, b) => b[1] - a[1])
+      return { items, count: items.length, total: items.reduce((n, r) => n + (r.amount || 0), 0), noAmount: items.filter((r) => r.amount == null).length, buyers: count((r) => r.buyer), sellers: count((r) => r.seller),
+        accounts: [[2, 4], [1, 3], [3, 1]], months: count((r) => r.date.slice(0, 7)).sort((a, b) => (a[0] < b[0] ? 1 : -1)), all: all.length, check: all.filter((r) => r.needsCheck).length, hidden: 0,
+        projects: [{ id: 1, name: X('11 月报销', 'November expenses'), buyer: B1, seller: null, accounts: [], from: '2026-11-01', to: '2026-11-30' }, { id: 2, name: X('知夏贸易 · 采购', 'Zhixia · purchasing'), buyer: B2, seller: null, accounts: [1], from: '', to: '' }].map((p) => { const xs = all.filter((r) => inProject(r, p.id)); return { ...p, count: xs.length, total: xs.reduce((n, r) => n + (r.amount || 0), 0) } }) }
+    },
+    invoice_detail: ({ id }) => ({ sellerTax: '', buyerTax: '',
+      files: id === 2 ? [{ id: 21, name: X('迅行出行电子发票.pdf', 'Swift Ride invoice.pdf'), ext: 'pdf', size: 75458, msgId: 100, role: 'invoice' }, { id: 22, name: X('迅行出行电子发票.xml', 'Swift Ride invoice.xml'), ext: 'xml', size: 4431, msgId: 100, role: 'invoice' }, { id: 23, name: X('迅行出行电子发票.pdf', 'Swift Ride invoice.pdf'), ext: 'pdf', size: 75458, msgId: 101, role: 'invoice' }]
+        : [{ id: 11, name: X('电子发票.pdf', 'invoice.pdf'), ext: 'pdf', size: 68102, msgId: 100, role: 'invoice' }, { id: 12, name: X('电子发票.ofd', 'invoice.ofd'), ext: 'ofd', size: 16599, msgId: 100, role: 'invoice' }],
+      extras: id === 2 ? [{ id: 24, name: X('迅行出行行程报销单.pdf', 'Swift Ride trip statement.pdf'), ext: 'pdf', size: 90722, msgId: 100, role: 'extra' }] : [],
+      mails: id === 2 ? [{ msgId: 100, accountId: 2, subject: X('迅行出行电子发票及行程报销单', 'Swift Ride invoice and trip statement'), from: X('迅行出行', 'Swift Ride'), date: t(2 * D) }, { msgId: 101, accountId: 1, subject: X('转发：迅行出行电子发票', 'Fwd: Swift Ride invoice'), from: ME, date: t(1 * D) }]
+        : [{ msgId: 100, accountId: 2, subject: X('您的电子发票已开具', 'Your invoice is ready'), from: X('开票服务', 'Invoicing'), date: t(1 * D) }] }),
+    invoice_update: () => null,
+    invoice_project_save: () => 1,
+    invoice_project_delete: () => null,
+    invoice_project_item: () => null,
+    invoice_open: () => null,
+    invoice_export: () => ['C:\\Users\\demo\\Downloads\\invoices.zip', 0],
     list_drafts: () => [],
     contacts: () => [],
     digest: () => ({

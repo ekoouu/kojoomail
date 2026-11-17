@@ -13,6 +13,7 @@ import MailList, { MovePicker } from './views/MailList'
 import Reader from './views/Reader'
 import Compose from './views/Compose'
 import TodoPage from './views/Todo'
+import InvoicesPage from './views/Invoices'
 import DigestPage from './views/Digest'
 import SettingsPage from './views/Settings'
 import Welcome from './views/Welcome'
@@ -154,6 +155,7 @@ function App() {
             {s.page !== 'settings' && <Sidebar />}
             {s.page === 'mail' && <div className="panel"><MailList /><Reader /></div>}
             {s.page === 'todo' && <div className="panel"><TodoPage /></div>}
+            {s.page === 'invoices' && <div className="panel"><InvoicesPage /></div>}
             {s.page === 'digest' && <div className="panel"><DigestPage /></div>}
             {s.page === 'settings' && <SettingsPage />}
           </>

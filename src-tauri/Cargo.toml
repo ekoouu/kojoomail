@@ -1,6 +1,6 @@
 [package]
 name = "kojoomail"
-version = "0.3.3"
+version = "0.3.4"
 description = "Kojoo Mail - 多邮箱 + AI 的桌面邮件客户端"
 authors = ["Eko"]
 license = "AGPL-3.0-or-later"
@@ -43,6 +43,11 @@ regex = { version = "1", default-features = false, features = ["std", "unicode-p
 dirs = "5"
 # 读系统语言：界面「跟随系统」时用
 sys-locale = "0.3"
+# 发票台账：拆压缩包 / 读 OFD（也是压缩包）、读数电票 XML、读 PDF 里的文字、导出汇总表
+zip = { version = "2", default-features = false, features = ["deflate"] }
+roxmltree = "0.20"
+pdf-extract = "0.7"
+rust_xlsxwriter = "0.79"
 
 [profile.release]
 opt-level = "s"

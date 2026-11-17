@@ -164,7 +164,7 @@ export function AddAccount() {
         <div className="group sq" style={{ padding: 16, marginTop: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div>
             <label className="label" htmlFor="a-email">{L('邮箱地址', 'Email address')}</label>
-            <input id="a-email" className="field" value={email} onChange={(e) => setEmail(e.target.value)} placeholder={p.domains[0] ? `name@${p.domains[0]}` : 'name@company.com'} autoFocus />
+            <input id="a-email" autoCapitalize="off" autoCorrect="off" spellCheck={false} className="field" value={email} onChange={(e) => setEmail(e.target.value)} placeholder={p.domains[0] ? `name@${p.domains[0]}` : 'name@company.com'} autoFocus />
           </div>
           <div>
             <div className="row" style={{ marginBottom: 6 }}>
@@ -191,9 +191,9 @@ export function AddAccount() {
         </div>
         {adv && !oauthOn && !unavailable && (
           <div className="group sq" style={{ marginTop: 8 }}>
-            <div className="gr"><span className="lbl">{L('收信服务器（IMAP）', 'Incoming server (IMAP)')}</span><div className="row" style={{ gap: 6 }}><input className="field inset mono" style={{ width: 200 }} value={h.imapHost} onChange={(e) => setH({ ...h, imapHost: e.target.value })} /><input className="field inset mono" style={{ width: 70 }} value={h.imapPort} onChange={(e) => setH({ ...h, imapPort: Number(e.target.value) || 993 })} /></div></div>
-            <div className="gr"><span className="lbl">{L('发信服务器（SMTP）', 'Outgoing server (SMTP)')}</span><div className="row" style={{ gap: 6 }}><input className="field inset mono" style={{ width: 200 }} value={h.smtpHost} onChange={(e) => setH({ ...h, smtpHost: e.target.value })} /><input className="field inset mono" style={{ width: 70 }} value={h.smtpPort} onChange={(e) => { const v = Number(e.target.value) || 465; setH({ ...h, smtpPort: v, smtpTls: v === 465 }) }} /></div></div>
-            <div className="gr"><div><div className="lbl">{L('登录用户名', 'Username')}</div><div className="sub">{L('一般就是邮箱地址，少数企业邮箱不一样', 'Usually your email address; a few work mailboxes differ')}</div></div><input className="field inset" style={{ width: 200 }} value={h.username} placeholder={L('同邮箱地址', 'Same as email address')} onChange={(e) => setH({ ...h, username: e.target.value })} /></div>
+            <div className="gr"><span className="lbl">{L('收信服务器（IMAP）', 'Incoming server (IMAP)')}</span><div className="row" style={{ gap: 6 }}><input className="field inset mono" autoCapitalize="off" autoCorrect="off" spellCheck={false} style={{ width: 200 }} value={h.imapHost} onChange={(e) => setH({ ...h, imapHost: e.target.value })} /><input className="field inset mono" autoCapitalize="off" autoCorrect="off" spellCheck={false} style={{ width: 70 }} value={h.imapPort} onChange={(e) => setH({ ...h, imapPort: Number(e.target.value) || 993 })} /></div></div>
+            <div className="gr"><span className="lbl">{L('发信服务器（SMTP）', 'Outgoing server (SMTP)')}</span><div className="row" style={{ gap: 6 }}><input className="field inset mono" autoCapitalize="off" autoCorrect="off" spellCheck={false} style={{ width: 200 }} value={h.smtpHost} onChange={(e) => setH({ ...h, smtpHost: e.target.value })} /><input className="field inset mono" autoCapitalize="off" autoCorrect="off" spellCheck={false} style={{ width: 70 }} value={h.smtpPort} onChange={(e) => { const v = Number(e.target.value) || 465; setH({ ...h, smtpPort: v, smtpTls: v === 465 }) }} /></div></div>
+            <div className="gr"><div><div className="lbl">{L('登录用户名', 'Username')}</div><div className="sub">{L('一般就是邮箱地址，少数企业邮箱不一样', 'Usually your email address; a few work mailboxes differ')}</div></div><input className="field inset" autoCapitalize="off" autoCorrect="off" spellCheck={false} style={{ width: 200 }} value={h.username} placeholder={L('同邮箱地址', 'Same as email address')} onChange={(e) => setH({ ...h, username: e.target.value })} /></div>
           </div>
         )}
         {err && <div className="err" style={{ marginTop: 12 }}>{err}</div>}
@@ -247,7 +247,7 @@ export function RepairAccount() {
         <div className="grow">
           <h1>{st?.state === 'error' || st?.state === 'offline' ? L(`${a.label || a.email} 无法同步`, `Can't sync ${a.label || a.email}`) : a.auth === 'oauth' ? L(`重新登录 ${a.label || a.email}`, `Sign in to ${a.label || a.email} again`) : L(`更换 ${a.label || a.email} 的${p.codeLabel}`, `Change the ${p.codeLabel} for ${a.label || a.email}`)}</h1>
           <p style={{ margin: '4px 0 0', fontSize: 13, lineHeight: 1.6, color: 'var(--sec)' }}>
-            {st?.state === 'offline' ? L('暂时连不上邮件服务器，网络恢复后会自动重连。', 'Can\'t reach the mail server right now. It will reconnect automatically when the network is back.') : st?.state === 'error' ? L(`邮件服务器拒绝了登录，${what}可能已修改、过期或被撤销。期间收到的邮件不会丢，重新连接后会自动补齐。`, `The mail server refused to sign in. The ${what} may have been changed, expired or revoked. No mail is lost in the meantime; it will catch up once you reconnect.`) : viaOAuth ? L('在浏览器里重新登录同一个账号，验证通过后才会替换。', 'Sign in to the same account again in your browser. It\'s only replaced once verified.') : L('新的密码验证通过后才会替换。', 'The new password is only saved once it\'s verified.')}
+            {st?.errorKind === 'store' ? st.error : st?.state === 'offline' ? L('暂时连不上邮件服务器，网络恢复后会自动重连。', 'Can\'t reach the mail server right now. It will reconnect automatically when the network is back.') : st?.state === 'error' ? L(`邮件服务器拒绝了登录，${what}可能已修改、过期或被撤销。期间收到的邮件不会丢，重新连接后会自动补齐。`, `The mail server refused to sign in. The ${what} may have been changed, expired or revoked. No mail is lost in the meantime; it will catch up once you reconnect.`) : viaOAuth ? L('在浏览器里重新登录同一个账号，验证通过后才会替换。', 'Sign in to the same account again in your browser. It\'s only replaced once verified.') : L('新的密码验证通过后才会替换。', 'The new password is only saved once it\'s verified.')}
           </p>
         </div>
         <button className="tb" aria-label={L('关闭', 'Close')} onClick={close}><Icon name="x" /></button>
@@ -289,7 +289,7 @@ export function RepairAccount() {
         {err && <div className="err">{err}</div>}
       </div>
       <div className="sh-foot">
-        {st?.state === 'offline' && <button className="btn link sq" onClick={() => { api.retryAccount(a.id); close() }}>{L('立即重试', 'Retry now')}</button>}
+        {(st?.state === 'offline' || st?.errorKind === 'store') && <button className="btn link sq" onClick={() => { api.retryAccount(a.id); close() }}>{L('立即重试', 'Retry now')}</button>}
         <button className="btn sq" style={{ marginLeft: 'auto' }} onClick={close}>{L('稍后处理', 'Later')}</button>
         {auth && (viaOAuth || a.auth !== 'oauth') && <button className="btn primary sq" disabled={busy} onClick={submit}>{busy ? (viaOAuth ? L('等浏览器里完成登录…', 'Waiting for the browser…') : L('正在验证…', 'Verifying…')) : viaOAuth ? L('在浏览器中登录', 'Sign in with browser') : L('重新连接', 'Reconnect')}</button>}
       </div>

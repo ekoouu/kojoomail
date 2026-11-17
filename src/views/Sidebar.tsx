@@ -33,7 +33,7 @@ export default function Sidebar() {
       {nav(isView('important'), 'flag', L('重点', 'Important'), s.counts.important, () => s.go({ kind: 'important' }), L('标了重点的，和 AI 判断需要尽快处理的', 'Emails you flagged, plus the ones AI thinks need attention soon'))}
       {nav(s.page === 'todo', 'todo', L('待办', 'To-dos'), s.counts.todos, () => s.set({ page: 'todo', selected: null }))}
       {nav(isView('followup'), 'wait', L('待跟进', 'Follow up'), s.counts.followups, () => s.go({ kind: 'followup' }), L('你发出去 3 天以上、对方还没回的邮件', "Emails you sent over 3 days ago that haven't been answered"))}
-      {nav(isView('bills'), 'receipt', L('账单发票', 'Bills & invoices'), s.counts.bills, () => s.go({ kind: 'bills' }), L('AI 认出来的账单、发票、付款和扣费提醒，加上你自己建的「发票」文件夹（各账号合在一起）', 'Bills, invoices and payment notices recognized by AI, plus your own "Invoices" folders (all accounts together)'))}
+      {nav(s.page === 'invoices', 'receipt', L('发票', 'Invoices'), null, () => s.set({ page: 'invoices', selected: null, open: null }), L('邮件附件里的发票：一张一行，重复收到的只算一张，可以按购买方、月份筛出来导出', 'Invoices attached to your emails: one row each, duplicates counted once; filter by buyer or month and export'))}
       {nav(isView('later'), 'clock', L('稍后处理', 'Snoozed'), s.counts.later, () => s.go({ kind: 'later' }))}
       {nav(isView('drafts'), 'draft', L('草稿', 'Drafts'), s.counts.drafts, () => s.go({ kind: 'drafts' }))}
       {nav(isView('sent'), 'send', L('已发送', 'Sent'), null, () => s.go({ kind: 'sent' }))}
@@ -48,19 +48,22 @@ export default function Sidebar() {
         const inbox = folders.find((f) => f.role === 'inbox')
         const on = isView('all', (v) => v.kind === 'all' && v.accountId === a.id)
         const err = st?.state === 'error'
+        const off = st?.state === 'offline'
+        const two = err || off
         const expanded = !!open[a.id]
         return (
           <div key={a.id}>
-            <button className={`nav sq${on ? ' on' : ''}`} style={err ? { height: 'auto', minHeight: 30, padding: '6px 10px', alignItems: 'flex-start' } : undefined}
+            <button className={`nav sq${on ? ' on' : ''}`} style={two ? { height: 'auto', minHeight: 30, padding: '6px 10px', alignItems: 'flex-start' } : undefined}
               onClick={() => (err ? s.set({ repairAccount: a.id }) : s.go({ kind: 'all', accountId: a.id }))} title={a.email}>
-              <span className={`chev${expanded ? ' open' : ''}`} style={err ? { marginTop: 2 } : undefined} role="button" aria-label={expanded ? L('收起文件夹', 'Collapse folders') : L('展开文件夹', 'Expand folders')}
+              <span className={`chev${expanded ? ' open' : ''}`} style={two ? { marginTop: 2 } : undefined} role="button" aria-label={expanded ? L('收起文件夹', 'Collapse folders') : L('展开文件夹', 'Expand folders')}
                 onClick={(e) => { e.stopPropagation(); setOpen({ ...open, [a.id]: !expanded }) }}>
                 <Icon name="right" size={12} />
               </span>
-              <span className="dot" style={{ background: a.color, margin: err ? '5px 5px 0' : '0 5px' }} />
-              <span className="grow truncate" style={{ lineHeight: err ? 1.35 : undefined }}>
+              <span className="dot" style={{ background: a.color, margin: two ? '5px 5px 0' : '0 5px' }} />
+              <span className="grow truncate" style={{ lineHeight: two ? 1.35 : undefined }}>
                 {a.label || a.email}
-                {err && <span className="err-line">{st.errorKind === 'auth' ? L('授权失效，点此修复', 'Sign-in expired. Click to fix') : L('连接出错，点此查看', 'Connection error. Click to see')}</span>}
+                {err && <span className="err-line">{st.errorKind === 'auth' ? L('授权失效，点此修复', 'Sign-in expired. Click to fix') : st.errorKind === 'store' ? L('读不到保存的密码，点此查看', 'Can\'t read the saved password. Click to see') : L('连接出错，点此查看', 'Connection error. Click to see')}</span>}
+                {off && <span className="off-line">{L('网络断开，正在重连', 'Offline, reconnecting')}</span>}
               </span>
               {err ? <Icon name="alert" size={15} style={{ color: 'var(--accent-text)', marginTop: 2 }} /> : inbox && inbox.unread > 0 ? <span className="cnt">{inbox.unread}</span> : null}
             </button>

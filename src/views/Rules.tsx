@@ -177,7 +177,7 @@ function RuleSheet({ init, onClose, onSave }: { init: Draft; onClose: () => void
                 <select className="field" style={field} aria-label={L('方式', 'Operator')} value={c.op} onChange={(e) => setCond(i, { op: e.target.value as RuleCond['op'] })}>
                   {(c.field === 'attachment' ? (['has', 'none'] as const) : (['contains', 'not_contains', 'equals'] as const)).map((o) => <option key={o} value={o}>{OP_LABEL[o]}</option>)}
                 </select>
-                {c.field !== 'attachment' && <input className="field grow" style={{ height: 28, fontSize: 12.5, minWidth: 120 }} maxLength={200} aria-label={L('内容', 'Text')} placeholder={c.field === 'subject' ? L('主题里的字', 'Text in the subject') : L('名字或邮箱地址', 'Name or email address')} value={c.value} onChange={(e) => setCond(i, { value: e.target.value })} />}
+                {c.field !== 'attachment' && <input className="field grow" style={{ height: 28, fontSize: 12.5, minWidth: 120 }} maxLength={200} aria-label={L('内容', 'Text')} placeholder={c.field === 'subject' ? L('主题里的字', 'Text in the subject') : L('名字或邮箱地址', 'Name or email address')} value={c.value} onChange={(e) => setCond(i, { value: e.target.value })} autoCapitalize="off" autoCorrect="off" spellCheck={false} />}
                 {c.field === 'attachment' && <span className="grow" />}
                 <button className="tb" aria-label={L('删除这条条件', 'Remove this condition')} disabled={d.conds.length <= 1} onClick={() => setD((x) => ({ ...x, conds: x.conds.filter((_, j) => j !== i) }))}><Icon name="x" size={14} /></button>
               </div>

@@ -280,12 +280,51 @@ async fn run(ctx: Arc<Ctx>, id: i64, rx: mpsc::UnboundedReceiver<Op>, wake: Arc<
             Ok(c) => c,
             Err(_) => return, // 账号被删了
         };
-        let Some(stored) = secret::get(&secret::account_key(id)) else {
-            set_status(&ctx, id, |s| { s.state = "error".into(); s.error_kind = "auth".into(); s.error = crate::i18n::t("没有找到这个账号的密码，请重新填写", "No password found for this account. Please enter it again.").into(); });
+        // 读凭据可能卡在系统弹窗上等用户点，别占着异步线程
+        let read = tokio::task::spawn_blocking(move || secret::read(&secret::account_key(id))).await.unwrap_or_else(|e| Err(e.to_string()));
+        let stored = match read {
+            Ok(v) => v,
+            Err(e) => {
+                // 这次没读到（Mac 锁屏 / 睡眠时钥匙串锁着）：密码还在，别报成授权失效，等一会儿自己再读
+                log_line(&ctx, id, tr!("读不到系统里保存的密码：{e}", "Couldn't read the saved password from the system: {e}"));
+                set_status(&ctx, id, |s| {
+                    // 要人去点系统弹窗才会好：算「需要处理」，不算网络问题
+                    s.state = "error".into();
+                    s.error_kind = "store".into();
+                    s.error = if cfg!(target_os = "macos") {
+                        tr!("读不到钥匙串里保存的密码。系统弹出「Kojoo Mail 想要使用钥匙串」时，请输入开机密码并点「始终允许」（更新后常会问一次）；稍后会自动再试。（{e}）", "Couldn't read the saved password from the keychain. When macOS asks whether Kojoo Mail may use the keychain, enter your login password and choose Always Allow (it often asks once after an update). It will try again shortly. ({e})")
+                    } else {
+                        tr!("暂时读不到系统里保存的密码，稍后会自动再试。（{e}）", "Couldn't read the saved password from the system just now. It will try again shortly. ({e})")
+                    };
+                });
+                // 平时的操作（点开邮件）不触发重读，免得一点就弹一次系统窗口；到点、点了「重试」、重新填了密码才再读
+                let base = secret::cred_gen(id);
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(backoff);
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => break,
+                        _ = wake.notified() => {
+                            park_ops(rx.as_mut().unwrap(), &mut backlog, crate::i18n::t("读不到这个账号保存的密码，请先处理", "Can't read this account's saved password. Fix that first."));
+                            if force.swap(false, Ordering::Relaxed) || secret::cred_gen(id) != base {
+                                secret::retry_now();
+                                break;
+                            }
+                        }
+                        _ = stop.notified() => return,
+                    }
+                }
+                backoff = (backoff * 2).min(300);
+                park_ops(rx.as_mut().unwrap(), &mut backlog, crate::i18n::t("读不到这个账号保存的密码，请先处理", "Can't read this account's saved password. Fix that first."));
+                continue;
+            }
+        };
+        let Some(stored) = stored else {
+            set_status(&ctx, id, |s| { s.state = "error".into(); s.error_kind = "auth".into(); s.fails = 0; s.error = crate::i18n::t("没有找到这个账号的密码，请重新填写", "No password found for this account. Please enter it again.").into(); });
             loop {
                 tokio::select! { _ = wake.notified() => {}, _ = stop.notified() => return }
                 park_ops(rx.as_mut().unwrap(), &mut backlog, crate::i18n::t("这个账号还没有密码", "This account has no password yet"));
-                if secret::get(&secret::account_key(id)).is_some() {
+                let again = tokio::task::spawn_blocking(move || secret::read(&secret::account_key(id))).await;
+                if !matches!(again, Ok(Ok(None))) {
                     break;
                 }
             }
@@ -903,6 +942,8 @@ impl SessionWorker {
         let fetches: Vec<async_imap::types::Fetch> = self.sess().uid_fetch(uid.to_string(), "(UID BODY.PEEK[])").await?.try_collect().await?;
         let raw = fetches.iter().find_map(|f| f.body().map(|b| b.to_vec())).ok_or_else(|| anyhow!("{}", crate::i18n::t("服务器上找不到这封邮件了", "This email is no longer on the server")))?;
         store_body(&self.ctx, msg_id, &raw)?;
+        // 带 PDF / XML / OFD / 压缩包的：后台看一下里面有没有发票（发票台账）
+        crate::invoice::on_body(&self.ctx, &mime::parse_full(&raw).atts);
         Ok(())
     }
 

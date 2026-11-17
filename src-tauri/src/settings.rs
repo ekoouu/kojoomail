@@ -29,6 +29,8 @@ pub struct Settings {
     pub ai_model_fine: String,
     pub ai_model_backup: String,
     pub ai_auto: bool,
+    /// AI 分析邮件时顺带把要办的事提取成待办（默认开；关掉后只有自己手动加的待办）
+    pub ai_todos: bool,
     /// skip_bulk | all | important
     pub ai_scope: String,
     pub ai_daily_limit: i64,
@@ -67,6 +69,7 @@ impl Default for Settings {
             ai_model_fine: String::new(),
             ai_model_backup: String::new(),
             ai_auto: true,
+            ai_todos: true,
             ai_scope: "skip_bulk".into(),
             ai_daily_limit: 200,
             ai_custom: String::new(),
@@ -124,6 +127,11 @@ pub fn save(ctx: &Ctx, s: &Settings) -> anyhow::Result<()> {
 
 /// 早期版本的默认接口写死在代码里、没存进设置。已经填过密钥的老用户：把当时的默认值存下来，升级后照常可用
 pub fn keep_legacy_ai(ctx: &Ctx) {
+    // Mac 版从第一版起设置里就存了接口，没有这种老用户；而且这里在建窗口之前、主线程上跑，
+    // 读钥匙串可能弹系统窗口等人点，窗口和托盘都出不来，看着像程序没启动
+    if cfg!(target_os = "macos") {
+        return;
+    }
     let (saved, accounts) = {
         let st = ctx.store.lock().unwrap();
         (st.setting("app"), st.conn.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get::<_, i64>(0)).unwrap_or(0))

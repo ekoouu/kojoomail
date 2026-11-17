@@ -52,13 +52,13 @@ function GuideZh() {
       <section>
         <h2 className="gh">看信</h2>
         <div className="group sq">
-          <Item k="全部收件箱">所有邮箱的新邮件按时间排在一起。左侧点某个账号，只看这个账号。</Item>
+          <Item k="全部收件箱">所有邮箱的新邮件按时间排在一起。左侧点某个账号，只看这个账号。账号的先后顺序在 设置 → 账号 里用每行右边的上移、下移调整。</Item>
           <Item k="今日简报">侧栏最上面。今天要回的信、今明两天的待办、待跟进、最近的账单，一页看完；配了 AI 的话开头还有一段 AI 写的概要。点任何一条直接打开那封信。</Item>
           <Item k="问邮箱">在搜索框里直接问，比如「上个月阿里云扣了多少钱？」。问号结尾或「多少、哪、什么时候」开头的会自动问 AI；普通搜索的结果上方也有「让 AI 从邮件里找答案」。回答里的小数字点一下就打开出处那封信。只会翻允许用 AI 的邮箱。</Item>
           <Item k="待跟进">你发出去 3 天以上、对方还没回的信（30 天内）。打开后可以让 AI 写一封跟进，或者点「不用跟进」不再提醒。</Item>
           <Item k="分类页签">列表上方的「全部 / 未读 / 账单 / 通知 …」。AI 把每封信分好类，有邮件的分类会自动出现，数字是未读数；在设置里选的常用分类排最前面。</Item>
           <Item k="会话视图">设置 → 通用 →「按会话显示」（默认关）。打开后，同一来回的邮件在列表里合成一行，名字后面的数字是这一串有几封；点开按时间从早到晚排，读过的折叠成一行、没读的和当前这封展开，点任意一封把它设为当前邮件。回复、归档、删除、标记都只针对当前这一封，不会动整串（在列表里对一行操作，动的是这一串里最新的那封）。搜索结果和「重点 / 稍后处理 / 账单发票 / 待跟进」里仍按单封显示。</Item>
-          <Item k="账单发票">侧栏里的「账单发票」：所有账号里 AI 认出来的账单、发票、付款和扣费提醒，归档了的也在；名字里带「发票」的文件夹里的信也算进来。</Item>
+          <Item k="发票">侧栏里的「发票」：邮件附件里的发票（PDF、OFD、XML，压缩包里的也算）自动列在这里，一张一行；同一张重复收到只算一张。可以按购买方、月份、销售方、邮箱筛选，右上角「导出」把筛出来的发票打成一个压缩包（发票文件按「日期_销售方_金额」重命名，加一张带合计的汇总表，行程单这类附带材料一起带上）。标着「待核对」的是没读全的，点开可以直接改；不想要的点「隐藏这张」。要长期归集一类发票（比如某个月的报销、某次出差、某个公司抬头），点「新建项目」起个名字、选好购买方 / 开票日期 / 邮箱 / 销售方：符合条件的发票自动归进这个项目，以后新收到的也一样；个别不对的可以在右边手动「移出这个项目」或「加进项目」，在项目里点「导出」导的就是这个项目。信用卡账单、扣费提醒这类邮件从页面右上角「账单类邮件」进。</Item>
           <Item k="整理">收件箱有通知和订阅时，列表右上角会出现「整理」：可以把它们全部标为已读，或者把订阅、通知全部归档。右键一封信还能「归档这个发件人的所有邮件」。归档前会先问你，之后也能撤销。</Item>
           <Item k="验证码">收到验证码邮件时，新邮件通知里会把验证码放在最前面（设置 → 通知与隐私里关了「通知里显示主题和摘要」就不显示）；打开这封信，发件人下面有「复制验证码」，点一下才复制。识别在本机完成，不经过 AI。</Item>
           <Item k="重点">AI 判断要尽快处理的、询盘，以及你自己标了重点（S 键）的。</Item>
@@ -90,7 +90,7 @@ function GuideZh() {
           <Item k="附件">读信时点附件直接用电脑上的程序打开，旁边的下载按钮存到「下载」文件夹。程序、脚本这类文件（.exe、.bat 等）不直接打开，要先保存。</Item>
           <Item k="撤销发送">点发送后有几秒可以撤销（秒数在设置 → 通知与隐私里改），撤销后回到编辑状态，附件、抄送都还在。</Item>
           <Item k="草稿">写到一半关掉会自动存草稿，在左侧「草稿」里继续写。</Item>
-          <Item k="待办">AI 从邮件里提取的事情会进「待办」，也可以自己加；有日期的会排进「今天 / 本周」。勾掉就算完成。</Item>
+          <Item k="待办">AI 从邮件里提取的事情会进「待办」，也可以自己加；有日期的会排进「今天 / 本周」。勾掉就算完成。右上角「清除」可以一次清掉已完成的、AI 自动生成的，或全部待办。不想让 AI 往里加，在设置 → AI 与模型 关掉「从邮件里自动生成待办」。</Item>
         </div>
       </section>
 
@@ -116,7 +116,7 @@ function GuideZh() {
       <section>
         <h2 className="gh">遇到问题</h2>
         <div className="group sq">
-          <Item k="账号无法同步">左侧账号下面出现「授权失效，点此修复」或「连接出错」时点它：密码或授权码改过就填新的；一键登录的账号点「重新登录」。网络问题会自动重连。</Item>
+          <Item k="账号无法同步">左侧账号下面出现「授权失效，点此修复」或「连接出错」时点它：密码或授权码改过就填新的；一键登录的账号点「重新登录」。网络问题会自动重连，重连期间那个账号下面会显示「网络断开，正在重连」。Mac 上出现「读不到保存的密码」时，密码没有丢：系统弹出「Kojoo Mail 想要使用钥匙串」就输入开机密码并点「始终允许」（更新后可能会问一次），没看到弹窗就点开那个账号按「立即重试」。</Item>
           <Item k="Gmail 连不上">确认代理软件开着，并且设置成了系统代理；或者在 设置 → 通用 → 代理 里选「自定义」填代理地址。选了自定义后代理没开会直接提示连不上代理。</Item>
           <Item k="没有 AI 批注">设置 → AI 与模型 →「测试连接」看看密钥和模型名能不能用（模型名不对时，在「模型分工」里点输入框从列表里选）；也可能是今天的自动分析额度用完了，打开邮件点「让 AI 分析」。</Item>
           <Item k="更新">有新版本时右下角会提示，点「更新」自动下载安装并重启；也可以在设置 → 关于点「检查更新」。更新包有签名校验，不是官方发布的装不上。</Item>
@@ -154,13 +154,13 @@ function GuideEn() {
       <section>
         <h2 className="gh">Reading mail</h2>
         <div className="group sq">
-          <Item k="All inboxes">New mail from every mailbox in one timeline. Click an account on the left to see only that account.</Item>
+          <Item k="All inboxes">New mail from every mailbox in one timeline. Click an account on the left to see only that account. To change the order of accounts, use the up and down arrows on each row in Settings → Accounts.</Item>
           <Item k="Today's digest">At the top of the sidebar. Emails to answer today, to-dos due today and tomorrow, follow-ups and recent bills on one page; with AI set up, it starts with a short AI overview. Click any item to open that email.</Item>
           <Item k="Ask your mailbox">Ask a question in the search box, such as "How much did Aliyun charge me last month?". Questions ending in a question mark or starting with words like how much, where, when or what go to AI automatically; normal search results also offer "Let AI find the answer in my mail". Click the small numbers in the answer to open the source email. Only mailboxes allowed to use AI are searched.</Item>
           <Item k="Follow up">Emails you sent more than 3 days ago that haven't had a reply (within 30 days). Open one to have AI write a follow-up, or click "No follow-up needed" to stop the reminder.</Item>
           <Item k="Category tabs">"All / Unread / Bill / Notification …" above the list. AI sorts every email into a category; categories with mail show up automatically, and the number is the unread count. Your favorite categories from Settings come first.</Item>
           <Item k="Conversation view">Settings → General → "Conversation view" (off by default). When it is on, replies in the same conversation share one row in the list, and the number after the names is how many emails it holds. Open it to read them oldest to newest: read ones are folded into one line, unread ones and the current email are expanded, and clicking any email makes it the current one. Reply, Archive, Delete and marking only apply to the current email, never the whole conversation (acting on a row in the list affects the newest email in it). Search results and Important / Snoozed / Bills & invoices / Follow up still show single emails.</Item>
-          <Item k="Bills & invoices">"Bills & invoices" in the sidebar: every bill, invoice, payment and charge notice AI recognizes across all accounts, including archived ones. Mail in folders whose name contains "invoice" (发票) counts too.</Item>
+          <Item k="Invoices">"Invoices" in the sidebar: invoices attached to your emails (PDF, OFD, XML, also inside archives) are listed here automatically, one row each; one received twice counts once. Filter by buyer, month, seller or mailbox, then "Export" at the top right packs what is shown into one archive (files renamed "date_seller_amount", a summary sheet with totals, and extras such as itineraries). Rows marked "Check" were not read completely; open one to fix it, or choose "Hide". To keep collecting one kind of invoice (a month of expenses, a trip, one buyer name), choose "New project", name it and pick buyer / invoice date / mailboxes / seller: matching invoices are collected into it, including ones that arrive later; fix the odd one by hand with "Remove from project" or "Add to project" on the right, and "Export" inside a project exports that project. Statements and charge notices are under "Bill emails" at the top right of the page.</Item>
           <Item k="Tidy up">When your inbox has notifications and newsletters, "Tidy up" appears at the top right of the list: mark them all as read, or archive all newsletters and notifications. Right-click an email to "Archive all mail from this sender". You're asked before anything is archived, and you can undo.</Item>
           <Item k="Verification codes">When a verification code email arrives, the new mail notification puts the code first (not shown when "Show subject and summary" is off in Settings → Notifications & privacy). Open the email and click "Copy code" below the sender; nothing is copied until you click. Codes are recognized on your device, without AI.</Item>
           <Item k="Important">Emails AI thinks need attention soon, inquiries, and the ones you marked important yourself (S key).</Item>
@@ -192,7 +192,7 @@ function GuideEn() {
           <Item k="Attachments">Click an attachment while reading to open it with an app on your computer; the download button next to it saves it to Downloads. Programs and scripts (.exe, .bat and so on) aren't opened directly; save them first.</Item>
           <Item k="Undo send">After clicking Send you have a few seconds to undo (set the seconds in Settings → Notifications & privacy). Undo brings you back to editing with attachments and Cc intact.</Item>
           <Item k="Drafts">Close an email halfway and it's saved as a draft; continue it under Drafts on the left.</Item>
-          <Item k="To-dos">Things AI pulls out of your email go into To-dos, and you can add your own. Ones with a date are grouped into Today / This week. Tick one to mark it done.</Item>
+          <Item k="To-dos">Things AI pulls out of your email go into To-dos, and you can add your own. Ones with a date are grouped into Today / This week. Tick one to mark it done. "Clear" at the top right removes completed ones, AI-generated ones, or everything in one go. To stop AI adding any, turn off "Create to-dos from emails" under Settings → AI &amp; models.</Item>
         </div>
       </section>
 
@@ -218,7 +218,7 @@ function GuideEn() {
       <section>
         <h2 className="gh">Troubleshooting</h2>
         <div className="group sq">
-          <Item k="Account won't sync">When "Sign-in expired, click to fix" or "Connection error" appears under an account on the left, click it: enter the new password or app password if it changed; for one-click sign-in accounts, click "Sign in again". Network problems reconnect automatically.</Item>
+          <Item k="Account won't sync">When "Sign-in expired, click to fix" or "Connection error" appears under an account on the left, click it: enter the new password or app password if it changed; for one-click sign-in accounts, click "Sign in again". Network problems reconnect automatically; meanwhile that account shows "Offline, reconnecting" underneath. On a Mac, "Can't read the saved password" does not mean the password is gone: when macOS asks whether Kojoo Mail may use the keychain, enter your login password and choose Always Allow (it may ask once after an update); if no prompt shows, open that account and click "Retry now".</Item>
           <Item k="Gmail won't connect">Make sure your proxy app is running and set as the system proxy, or choose Custom under Settings → General → Proxy and enter its address. With Custom, you get a clear error if the proxy isn't running.</Item>
           <Item k="No AI notes">Settings → AI & models → "Test connection" to check that the key and model name work (if the model name is wrong, click the field under "Model roles" and pick from the list). Today's automatic analysis limit may also be used up; open the email and click "Analyze with AI".</Item>
           <Item k="Updates">When a new version is out, a prompt appears at the bottom right; click "Update" to download, install and restart. You can also click "Check for updates" in Settings → About. Updates are signature-checked, so unofficial builds won't install.</Item>

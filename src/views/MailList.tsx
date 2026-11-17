@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { ask } from '../lib/ask'
 import { Icon } from '../icons'
 import { rowKey, useApp } from '../store'
@@ -44,7 +44,7 @@ export function MovePicker() {
         <button className="tb" aria-label={L('关闭', 'Close')} onClick={close}><Icon name="x" /></button>
       </div>
       <div className="sh-body">
-        <input className="field" autoFocus placeholder={L('按名字找文件夹', 'Find a folder by name')} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && list[0]) go(list[0]) }} />
+        <input className="field" autoFocus placeholder={L('按名字找文件夹', 'Find a folder by name')} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && list[0]) go(list[0]) }} autoCapitalize="off" autoCorrect="off" spellCheck={false} />
         <div className="group sq" style={{ marginTop: 12, maxHeight: 360, overflowY: 'auto' }}>
           {list.length === 0 ? <div className="gr" style={{ color: 'var(--sec)', fontSize: 13 }}>{L('没有可以移过去的文件夹', 'No folders to move to')}</div> : list.map((f) => (
             <button key={f.id} className="gr" style={{ width: '100%', border: 0, background: 'transparent', textAlign: 'left', cursor: 'pointer' }} onClick={() => go(f)}>
@@ -97,6 +97,15 @@ export default function MailList() {
   const menu = useMenu()
   const [drafts, setDrafts] = useState<Draft[] | null>(null)
   const isDrafts = s.view.kind === 'drafts'
+  // 列表里写的账号名：有显示名称用显示名称，没有就用 @ 前面那段；两个账号写出来一样时（sales@a / sales@b）写完整邮箱
+  const acctShort = (id: number) => {
+    const short = (a: (typeof s.accounts)[number]) => a.label || a.email.split('@')[0]
+    const a = s.accounts.find((x) => x.id === id)!
+    const same = s.accounts.filter((x) => x.id !== id && short(x) === short(a))
+    if (!same.length) return short(a)
+    const dom = (x: typeof a) => x.email.split('@')[1] || x.email
+    return same.some((x) => dom(x) === dom(a)) ? a.email : dom(a)
+  }
   // 分类页签（AI 整理）：当前视图里有邮件的分类都列出来，常用分类排前面；数字是未读
   const viewAcc = s.view.kind === 'all' || s.view.kind === 'folder' ? s.view.accountId : undefined
   const focus: string[] = viewAcc ? (s.accounts.find((a) => a.id === viewAcc)?.focus ?? []) : FOCUS_CATS.filter((c) => s.accounts.some((a) => a.focus.includes(c)))
@@ -239,7 +248,7 @@ export default function MailList() {
                   <span onClick={(e) => { e.stopPropagation(); s.toggleCheck(m.id) }} title={L('选择', 'Select')}>
                     {isChecked
                       ? <span className="avatar" style={{ background: 'var(--navy)', color: '#fff' }}><Icon name="check" size={18} /></span>
-                      : <Avatar name={p.name} email={p.email} badge={s.accounts.length > 1 ? acc?.color : undefined} />}
+                      : <Avatar name={p.name} email={p.email} />}
                   </span>
                   <div style={{ minWidth: 0 }}>
                     <div className="row" style={{ alignItems: 'baseline', gap: 6 }}>
@@ -247,6 +256,10 @@ export default function MailList() {
                       {th && <span className="tcount" title={L(`这个会话有 ${th.count} 封`, `${th.count} emails in this conversation`)}>{th.count}</span>}
                       {(th ? th.hasAtt : m.hasAtt) && <Icon name="clip" size={13} style={{ color: 'var(--ter)', alignSelf: 'center' }} />}
                       {(th ? th.flagged : m.flagged) && <Icon name="flag" size={13} className="flag" style={{ alignSelf: 'center' }} />}
+                      {/* 是哪个邮箱收到 / 发出的：混着看多个账号时，在时间前面写账号名（以前是头像右下角的色点，看着像未读提醒） */}
+                      {s.accounts.length > 1 && acc && !viewAcc && (
+                        <span className="acctname truncate" style={{ '--ac': acc.color } as CSSProperties} title={acc.email}>{acctShort(acc.id)}</span>
+                      )}
                       <span className="time">{shortTime(m.date)}</span>
                     </div>
                     <div className="subj truncate">{m.subject || L('（无主题）', '(No subject)')}</div>

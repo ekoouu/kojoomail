@@ -454,10 +454,13 @@ function MailBody({ m }: { m: MsgFull }) {
   useEffect(() => () => ro.current?.disconnect(), [])
 
   const onClick = async (e: MouseEvent) => {
-    const a = (e.target as Element).closest('a')
+    const a = (e.target as Element).closest('a, area')
     if (!a) return
     e.preventDefault()
-    const href = (a.getAttribute('href') || '').trim()
+    let href = (a.getAttribute('href') || '').trim()
+    // 阿里系等邮件常省掉开头的 https:（//host/…）或者只写 www.…：补全了再打开，不然点了没反应
+    if (href.startsWith('//')) href = `https:${href}`
+    else if (/^www\./i.test(href)) href = `https://${href}`
     // 钓鱼常见手法：显示的是一个网址，点过去是另一个网站
     const shown = hostIn(a.textContent || '')
     const real = hostIn(href)
@@ -466,6 +469,16 @@ function MailBody({ m }: { m: MsgFull }) {
       s.openCompose('new', null, { prefill: { to: decodeURIComponent(href.slice(7).split('?')[0]) } })
     } else if (/^https?:/i.test(href)) {
       api.openUrl(href).catch((err) => s.toast(L(`链接打不开：${errText(err)}`, `Couldn't open the link: ${errText(err)}`), { kind: 'err' }))
+    } else if (href.startsWith('#')) {
+      // 信里的「跳到某一段」
+      let id = href.slice(1)
+      try { id = decodeURIComponent(id) } catch { /* 按原样找 */ }
+      const d = a.ownerDocument
+      const to = id ? d.getElementById(id) || d.getElementsByName(id)[0] : null
+      to?.scrollIntoView({ block: 'start' })
+    } else if (href) {
+      // 别的类型（电话、应用专用链接等）不打开，但要说一声，不能点了没动静
+      s.toast(L(`这个链接打不开：${href.slice(0, 80)}`, `This link can't be opened: ${href.slice(0, 80)}`), { kind: 'err' })
     }
   }
   // 用 iframe 自己的 onLoad（元素一创建就挂上）：在 useEffect 里再挂 load 监听，正文载入快时会错过，点链接就没反应
