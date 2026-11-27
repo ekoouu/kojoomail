@@ -250,7 +250,28 @@ pub(crate) fn v6_invoice_projects(tx: &rusqlite::Transaction) -> rusqlite::Resul
     )
 }
 
-const MIGRATIONS: &[Step] = &[v2_translations, v3_threads, v4_rules, v5_invoices, v6_invoice_projects];
+/// 数据版本 7：文件夹记下服务器用的层级分隔符（各家不同，常见 / 和 .）。侧栏排子文件夹、判断「在不在某个文件夹下面」都靠它；
+/// 老数据先是空的，下一次同步文件夹清单时填上
+pub(crate) fn v7_folder_delim(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch("ALTER TABLE folders ADD COLUMN delim TEXT NOT NULL DEFAULT ''")
+}
+
+/// 数据版本 8：签名不再写进草稿正文（2026-11，PR #11）。草稿单独记这封带不带签名、引用的原邮件是哪一段。
+/// `sig`：0 = 老草稿，签名在正文里的什么位置说不清（是什么样就什么样，不再另加）/ 1 = 带签名 / 2 = 这封不带。
+/// 已有的草稿趁升级这一刻整理：这时账号的签名还是存草稿时的那个（之后用户一改签名就对不上了）。
+/// 正文正好以签名结尾的把签名拿掉、记成 1；账号本来没签名的也记成 1；其余的（回复：签名夹在正文和引用之间；用户自己删改过的）留 0
+pub(crate) fn v8_draft_sig(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE drafts ADD COLUMN sig INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE drafts ADD COLUMN quote TEXT NOT NULL DEFAULT '';
+         UPDATE drafts SET sig=1, body=substr(body, 1, length(body) - length((SELECT signature FROM accounts WHERE id=drafts.account_id)) - 2)
+           WHERE EXISTS (SELECT 1 FROM accounts a WHERE a.id=drafts.account_id AND a.signature<>''
+                         AND substr(drafts.body, -(length(a.signature) + 2)) = char(10) || char(10) || a.signature);
+         UPDATE drafts SET sig=1 WHERE sig=0 AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.id=drafts.account_id AND a.signature<>'');",
+    )
+}
+
+const MIGRATIONS: &[Step] = &[v2_translations, v3_threads, v4_rules, v5_invoices, v6_invoice_projects, v7_folder_delim, v8_draft_sig];
 /// 当前代码对应的数据版本
 pub const LATEST: i64 = MIGRATIONS.len() as i64 + 1;
 
@@ -447,6 +468,49 @@ pub fn now() -> i64 {
 #[cfg(test)]
 mod migrate_tests {
     use super::*;
+
+    /// 数据版本 8：升级时把老草稿末尾的签名拿掉；夹在中间的、对不上的不动
+    #[test]
+    fn v8_strips_trailing_signature_from_old_drafts() {
+        let mut c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE accounts(id INTEGER PRIMARY KEY, signature TEXT NOT NULL DEFAULT '');
+             CREATE TABLE drafts(id INTEGER PRIMARY KEY, account_id INTEGER, body TEXT NOT NULL DEFAULT '');
+             INSERT INTO accounts VALUES (1, '张三
+电话 123'), (2, '');
+             INSERT INTO drafts VALUES
+               (1, 1, '你好
+
+张三
+电话 123'),
+               (2, 1, '收到
+
+张三
+电话 123
+
+在某时，某人写道：
+> 原文'),
+               (3, 1, '签名被我删了'),
+               (4, 2, '这个账号没签名'),
+               (5, 1, '
+
+张三
+电话 123'),
+               (6, NULL, '没有账号的草稿');",
+        )
+        .unwrap();
+        let tx = c.transaction().unwrap();
+        v8_draft_sig(&tx).unwrap();
+        tx.commit().unwrap();
+        let got: Vec<(i64, i64, String, String)> = c.prepare("SELECT id, sig, body, quote FROM drafts ORDER BY id").unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap().map(|x| x.unwrap()).collect();
+        assert_eq!(got[0], (1, 1, "你好".into(), String::new()));
+        assert_eq!((got[1].0, got[1].1), (2, 0));
+        assert!(got[1].2.contains("张三") && got[1].2.contains("> 原文"));
+        assert_eq!(got[2], (3, 0, "签名被我删了".into(), String::new()));
+        assert_eq!(got[3], (4, 1, "这个账号没签名".into(), String::new()));
+        assert_eq!(got[4], (5, 1, String::new(), String::new()));
+        assert_eq!(got[5], (6, 1, "没有账号的草稿".into(), String::new()));
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("kjm-migrate-{name}-{}", std::process::id()));

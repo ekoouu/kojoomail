@@ -263,6 +263,7 @@ a { color: var(--navy); }
 .acct-body { border-top: .5px solid var(--line-2); padding-left: 44px; }
 .btn.link.sm { height: 22px; font-size: 12px; }
 .nav.sub { padding-left: 34px; min-height: 28px; font-size: 12.5px; }
+.nav.add-folder { color: var(--sec); font-size: 12px; }
 .nav .err-line { display: block; font-size: 11px; color: var(--accent-text); }
 .nav .off-line { display: block; font-size: 11px; color: var(--ter); }
 .side .foot { flex: none; padding: 8px 10px 0; }
@@ -277,6 +278,10 @@ a { color: var(--navy); }
 .list { width: 380px; flex: none; display: flex; flex-direction: column; border-right: .5px solid var(--line); min-width: 300px; }
 .list-head { padding: 16px 16px 10px; }
 .list-head h1 { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: -.022em; }
+.bulk-bar { margin-top: 12px; min-height: 32px; padding: 2px 4px 2px 10px; border-radius: 8px; background: var(--invert); color: var(--invert-text); }
+.bulk-bar .tb { color: inherit; width: 27px; height: 27px; }
+.bulk-all { border: 0; background: transparent; color: inherit; opacity: .82; font-size: 11.5px; margin-left: 8px; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; white-space: nowrap; }
+.bulk-all:hover { opacity: 1; }
 .rows { flex: 1; overflow-y: auto; padding: 0 8px 16px; overscroll-behavior: contain; }
 .group-h { font-size: 11px; font-weight: 600; color: var(--ter); padding: 10px 16px 6px; }
 .mrow { position: relative; display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 12px; padding: var(--row-pad) 12px; border-radius: 12px; cursor: pointer; }
@@ -442,6 +447,12 @@ a { color: var(--navy); }
 .set-main .group .gr .field.inset { max-width: 46%; }
 .set-main h1 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -.022em; }
 .set-main .lead { margin: 4px 0 0; font-size: 13px; color: var(--sec); }
+/* 签名预览：按发出去的样子显示，白底、字体字号和发信时套的一样（签名里的颜色、图片多是按白底配的），深色主题下也不变，和读信的白底卡片一个道理。
+   最小高度和三行的输入框一样，切换时下面的内容不跳 */
+.sig-preview { min-height: 77px; max-height: 320px; overflow: auto; padding: 8px 12px; border-radius: 8px; background: #fff; color: #1F2A37; color-scheme: light; box-shadow: 0 0 0 .5px var(--line); font: 14px/1.6 -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif; letter-spacing: 0; user-select: text; }
+.sig-preview a { color: #1B4A80; }
+.sig-preview > :first-child { margin-top: 0; }
+.sig-preview > :last-child { margin-bottom: 0; }
 
 /* 写信 */
 .compose { width: min(1000px, calc(100vw - 80px)); max-width: none; height: calc(100vh - 100px); }
@@ -457,6 +468,14 @@ a { color: var(--navy); }
 .compose textarea { flex: 1; resize: none; border: 0; outline: 0; background: transparent; padding: 12px 24px 20px; font-size: var(--body-size); line-height: 1.6; color: var(--ink-2); font-family: var(--sans); }
 .compose .preview { flex: 1; overflow-y: auto; padding: 12px 24px 20px; font-size: var(--body-size); line-height: 1.6; color: var(--ink-2); user-select: text; }
 .compose .preview p { margin: 0 0 8px; }
+/* 写信里的签名：正文下面单独一块，排好版、只读，和设置里的预览同一个样式；不占太多高度 */
+/* 窗口矮的时候签名块先缩（里面自己滚动），正文输入框至少留几行 */
+.compose .c-edit > textarea { min-height: 96px; }
+.compose .c-sig { display: flex; flex-direction: column; gap: 6px; flex: 0 1 auto; min-height: 34px; margin: 0 24px; padding: 0 0 14px; border-top: .5px solid var(--line-2); }
+.compose .c-sig .head { display: flex; align-items: center; gap: 10px; padding-top: 8px; min-height: 24px; flex: none; }
+.compose .c-sig .head .k { font-size: 12px; color: var(--ter); margin-right: auto; }
+.compose .c-sig.off { padding-bottom: 8px; }
+.compose .c-sig .sig-preview { min-height: 0; max-height: 160px; flex: 0 1 auto; }
 .compose .c-foot { display: flex; align-items: center; gap: 8px; padding: 10px 24px; border-top: .5px solid var(--line-2); flex-wrap: wrap; }
 .ai-side { width: 280px; flex: none; padding: 18px 14px; background: var(--paper); border-left: .5px solid var(--line); display: flex; flex-direction: column; gap: 18px; overflow-y: auto; }
 .act { display: flex; align-items: center; gap: 10px; width: 100%; height: 34px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; font-size: 13px; color: var(--ink-2); text-align: left; cursor: pointer; }

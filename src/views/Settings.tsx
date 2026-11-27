@@ -1,15 +1,17 @@
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { ask } from '../lib/ask'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Icon } from '../icons'
 import { useApp } from '../store'
 import { api, errText, FOCUS_CATS, type Account } from '../lib/api'
 import { ACCOUNT_COLORS, accountLabel, ago, initials } from '../lib/format'
-import { Seg, Switch } from '../ui'
+import { MdView, Seg, Switch } from '../ui'
 import { GuideContent } from './Guide'
 import { Rules } from './Rules'
 import { DATA_DIR, IS_MAC, TRAY, VAULT, keyText } from '../lib/platform'
 import { L, catLabel } from '../lib/i18n'
+import { foldImages, imageName, unfoldImages } from '../lib/md'
+import { signatureImage } from '../lib/sigimg'
 
 // 侧栏分组，和主界面侧栏一样带小标题
 const GROUPS: [string, [string, string, string][]][] = [
@@ -203,10 +205,30 @@ function AccountCard({ a, open = true, onToggle, onUp, onDown }: { a: Account; o
   const [label, setLabel] = useState(a.label)
   const [name, setName] = useState(a.displayName)
   const [sig, setSig] = useState(a.signature)
+  const [sigMode, setSigMode] = useState<'edit' | 'preview'>('edit')
   // 常用分类：本地先变（连点几个不会互相覆盖），保存后以后端为准
   const [focus, setFocus] = useState(a.focus)
   useEffect(() => setFocus(a.focus), [a.focus.join('|')])
   const save = async (p: Parameters<typeof api.updateAccount>[1]) => { try { await api.updateAccount(a.id, p); s.refreshMeta() } catch (e) { s.toast(errText(e), { kind: 'err' }) } }
+  // 签名里的图片存的是一长串字符，输入框里换成短名字（sig-image-…）显示，见 md.ts 的 foldImages
+  const sigBox = useRef<HTMLTextAreaElement>(null)
+  // 签名的保存一个接一个做：点「插入图片」时输入框先失去焦点存一次旧的，紧接着存带图片的，后一次不能被前一次盖掉
+  const sigQueue = useRef<Promise<unknown>>(Promise.resolve())
+  const saveSig = (v: string) => { sigQueue.current = sigQueue.current.then(() => save({ signature: v })) }
+  const sigPick = useRef<HTMLInputElement>(null)
+  const sigShown = useMemo(() => foldImages(sig), [sig])
+  const addSigImage = async (file: File) => {
+    try {
+      const { uri, width } = await signatureImage(file)
+      // 插在光标那里，自己成一段（前后各空一行）：图片紧挨着下一行文字的话，Markdown 会把后面几行都当成 HTML 原样输出，换行和链接就都不排了
+      const at = Math.min(sigBox.current?.selectionStart ?? sigShown.length, sigShown.length)
+      const [before, after] = [sigShown.slice(0, at).replace(/\n+$/, ''), sigShown.slice(at).replace(/^\n+/, '')]
+      const next = before + (before ? '\n\n' : '') + `<img src="${imageName(uri)}" width="${width}" alt="">` + (after ? '\n\n' : '') + after
+      const real = unfoldImages(next)
+      setSig(real)
+      saveSig(real)
+    } catch (e) { s.toast(errText(e), { kind: 'err' }) }
+  }
   const state = !st ? L('等待连接', 'Waiting to connect') : st.state === 'idle' ? L(`已同步 · ${st.lastOk ? ago(st.lastOk) : ''}`, `Synced · ${st.lastOk ? ago(st.lastOk) : ''}`) : st.state === 'syncing' ? L('正在同步', 'Syncing') : st.state === 'connecting' ? L('正在连接', 'Connecting') : st.state === 'error' ? st.error : L(`离线：${st.error}`, `Offline: ${st.error}`)
   const bad = st?.state === 'error' || st?.state === 'offline'
   const Wrap = onToggle ? 'div' : 'section'
@@ -241,8 +263,16 @@ function AccountCard({ a, open = true, onToggle, onUp, onDown }: { a: Account; o
           </div>
         </div>
         <div style={{ padding: '10px 14px 12px', borderTop: '.5px solid var(--line-2)' }}>
-          <div className="lbl" style={{ marginBottom: 6 }}>{L('签名', 'Signature')}</div>
-          <textarea className="field" rows={3} style={{ height: 'auto', padding: '8px 12px', resize: 'vertical', lineHeight: 1.5 }} value={sig} onChange={(e) => setSig(e.target.value)} onBlur={() => sig !== a.signature && save({ signature: sig })} placeholder={L('写新邮件时自动加在末尾', 'Added to the end of new emails')} />
+          <div className="row" style={{ marginBottom: 6, gap: 10 }}>
+            <span className="lbl" style={{ flex: 'none' }}>{L('签名', 'Signature')}</span>
+            <span className="row" style={{ gap: 5, fontSize: 12, color: 'var(--sec)' }}><Icon name="markdown" size={16} />{L('支持 Markdown、HTML', 'Supports Markdown and HTML')}</span>
+            <button className="btn link sm" style={{ flex: 'none' }} onClick={() => sigPick.current?.click()}>{L('插入图片', 'Insert image')}</button>
+            <input ref={sigPick} type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) addSigImage(f) }} />
+            <div style={{ marginLeft: 'auto', flex: 'none' }}><Seg small value={sigMode} onChange={setSigMode} options={[['edit', L('编辑', 'Edit')], ['preview', L('预览', 'Preview')]]} /></div>
+          </div>
+          {/* 预览时输入框只是藏起来：切回编辑，拖过的高度和撤销记录都还在 */}
+          <textarea ref={sigBox} className="field" rows={3} style={{ height: 'auto', padding: '8px 12px', resize: 'vertical', lineHeight: 1.5, display: sigMode === 'edit' ? undefined : 'none' }} value={sigShown} onChange={(e) => setSig(unfoldImages(e.target.value))} onBlur={() => sig !== a.signature && saveSig(sig)} spellCheck={false} autoCapitalize="off" autoCorrect="off" placeholder={L('写新邮件时自动加在末尾', 'Added to the end of new emails')} aria-label={L('签名', 'Signature')} />
+          {sigMode === 'preview' && <MdView className="sig-preview" md={sig} />}
         </div>
         <div className="gr" style={{ alignItems: 'flex-start', paddingTop: 10, paddingBottom: 10 }}>
           <div style={{ flex: '1 1 auto', minWidth: 0 }}><div className="lbl">{L('常用分类', 'Category tabs')}</div><div className="sub">{L('邮件列表上方的筛选页签。分类由 AI 判断；没配 AI 时只能自动认出「通知」「订阅」', 'Filter tabs above the mail list. Categories come from AI; without AI only Notifications and Newsletters are detected')}</div></div>

@@ -95,10 +95,10 @@ function useShortcuts(searchRef: React.RefObject<HTMLInputElement>) {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); searchRef.current?.focus(); return }
       if ((e.ctrlKey || e.metaKey) && e.key === ',') { e.preventDefault(); s.set({ page: 'settings' }); return }
       // Ctrl+A：选中列表里已加载的全部邮件（输入框里照常全选文字）
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && !isTyping(e) && s.page === 'mail' && !s.compose && !s.addAccount && !s.repairAccount && !s.movePick && s.items.length) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && !isTyping(e) && s.page === 'mail' && !s.compose && !s.addAccount && !s.repairAccount && !s.movePick && !s.guide && s.view.kind !== 'drafts' && s.items.length && !document.querySelector('.sheet, .menu')) {
         e.preventDefault(); s.set({ checked: new Set(s.items.map((m) => m.id)) }); return
       }
-      if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey || s.compose || s.addAccount || s.repairAccount || s.movePick || s.guide || document.querySelector('.menu')) return
+      if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey || s.compose || s.addAccount || s.repairAccount || s.movePick || s.guide || document.querySelector('.menu, .sheet')) return
       if (!s.accounts.length) return
       const idx = curRow(s)
       const cur = s.open

@@ -7,6 +7,7 @@ use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::client::{AsyncSmtpConnection, AsyncTokioStream, TlsParameters};
 use lettre::transport::smtp::extension::ClientId;
 use mail_builder::headers::address::Address as MbAddress;
+use mail_builder::mime::MimePart;
 use mail_builder::MessageBuilder;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -199,7 +200,30 @@ pub fn build(o: &Outgoing, domain: &str, bcc_header: bool) -> Result<Vec<u8>> {
     if bcc_header && !o.bcc.is_empty() {
         b = b.bcc(list(&o.bcc));
     }
-    if !o.html.is_empty() {
+    // 正文里写成一长串字符的图片（签名里的 logo）改成邮件的内嵌图片再发：Gmail、Outlook 不显示前一种
+    let (html, images) = embed_data_images(&o.html, domain);
+    let custom = if !images.is_empty() {
+        // 有内嵌图片时自己排结构：纯文字 / （排版正文 + 图片）二选一，外面再挂附件。
+        // 交给 mail-builder 默认排的话，图片和附件平级，不少邮箱会把它们又当成附件列一遍
+        let mut related = vec![MimePart::new("text/html", html)];
+        for (mime, cid, data) in images {
+            related.push(MimePart::new(mime, data).inline().cid(cid));
+        }
+        let alt = MimePart::new("multipart/alternative", vec![MimePart::new("text/plain", o.text.clone()), MimePart::new("multipart/related", related)]);
+        let body = if o.attachments.is_empty() {
+            alt
+        } else {
+            let mut parts = vec![alt];
+            for a in &o.attachments {
+                parts.push(MimePart::new(a.mime.clone(), a.data.clone()).attachment(a.name.clone()));
+            }
+            MimePart::new("multipart/mixed", parts)
+        };
+        Some(body)
+    } else {
+        None
+    };
+    if custom.is_none() && !o.html.is_empty() {
         b = b.html_body(o.html.clone());
     }
     if !o.in_reply_to.is_empty() {
@@ -209,10 +233,94 @@ pub fn build(o: &Outgoing, domain: &str, bcc_header: bool) -> Result<Vec<u8>> {
     if !refs.is_empty() {
         b = b.references(refs);
     }
-    for a in &o.attachments {
-        b = b.attachment(a.mime.clone(), a.name.clone(), a.data.clone());
+    // 自己排了结构的（有内嵌图片）整个正文换成它，附件已经在里面；别在上面提前返回：回复要带的 In-Reply-To / References 在这之前才加上
+    match custom {
+        Some(body) => b = b.body(body),
+        None => {
+            for a in &o.attachments {
+                b = b.attachment(a.mime.clone(), a.name.clone(), a.data.clone());
+            }
+        }
     }
     Ok(b.write_to_vec()?)
+}
+
+/// 把 `<img src="data:image/…;base64,…">` 换成 `cid:`，返回新的正文和要内嵌的图片（类型、编号、内容）。
+/// 只认 img 标签里的、只认 png / jpeg / gif / webp；解不开的原样留着。同一张图只带一份
+pub(crate) fn embed_data_images(html: &str, domain: &str) -> (String, Vec<(String, String, Vec<u8>)>) {
+    use base64::Engine;
+    const MARK: &str = "src=\"data:image/";
+    let mut out = String::with_capacity(html.len());
+    let mut images: Vec<(String, String, Vec<u8>)> = vec![];
+    let mut seen: Vec<(String, String)> = vec![]; // 原来的那串字符 → 编号
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let mut rest = html;
+    while let Some(i) = rest.to_ascii_lowercase().find("<img") {
+        let (before, tag_on) = rest.split_at(i);
+        out.push_str(before);
+        // 标签到哪儿结束：引号里的 > 不算
+        let mut end = tag_on.len();
+        let mut quote = None;
+        for (k, ch) in tag_on.char_indices() {
+            match (quote, ch) {
+                (None, '"') | (None, '\'') => quote = Some(ch),
+                (Some(q), c) if c == q => quote = None,
+                (None, '>') => {
+                    end = k + 1;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let (tag, after) = tag_on.split_at(end);
+        rest = after;
+        // 界面清洗时不分大小写（DATA:IMAGE/PNG;BASE64, 也放行），这里也得认，不然发出去的还是对方看不到的那种。
+        // 转成小写只动英文字母，长度和位置都不变，找到位置后回原文里取
+        let lower = tag.to_ascii_lowercase();
+        let parsed = lower.find(MARK).and_then(|a| {
+            let val_start = a + 5; // 跳过 src="
+            let val_len = tag[val_start..].find('"')?;
+            let val = &tag[val_start..val_start + val_len];
+            let cut = lower[val_start..val_start + val_len].find(";base64,")?;
+            let (head, b64) = (&lower[val_start..val_start + cut], &val[cut + ";base64,".len()..]);
+            let mime = match &head["data:".len()..] {
+                "image/png" => "image/png",
+                "image/jpeg" | "image/jpg" => "image/jpeg",
+                "image/gif" => "image/gif",
+                "image/webp" => "image/webp",
+                _ => return None,
+            };
+            Some((val_start, val_len, mime, b64))
+        });
+        let Some((val_start, val_len, mime, b64)) = parsed else {
+            out.push_str(tag);
+            continue;
+        };
+        let key = format!("{mime};{b64}");
+        let cid = match seen.iter().find(|(v, _)| *v == key) {
+            Some((_, cid)) => cid.clone(),
+            None => {
+                let clean: String = b64.chars().filter(|c| !c.is_whitespace()).collect();
+                let data = base64::engine::general_purpose::STANDARD
+                    .decode(clean.as_bytes())
+                    .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(clean.trim_end_matches('=').as_bytes()));
+                let Ok(data) = data else {
+                    out.push_str(tag);
+                    continue;
+                };
+                let cid = format!("img{}.{}@{}", images.len() + 1, stamp, domain);
+                images.push((mime.to_string(), cid.clone(), data));
+                seen.push((key, cid.clone()));
+                cid
+            }
+        };
+        out.push_str(&tag[..val_start]);
+        out.push_str("cid:");
+        out.push_str(&cid);
+        out.push_str(&tag[val_start + val_len..]);
+    }
+    out.push_str(rest);
+    (out, images)
 }
 
 /// 信封：发件人和全部收件人（含密送），顺带检查地址格式。Graph 发信不用信封，但也先过这一遍
@@ -239,6 +347,59 @@ pub async fn send(c: &SmtpCfg, o: &Outgoing, raw: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 内嵌图片：换成 cid、同一张只带一份、不认识的和解不开的原样留着；组出来的信自己能读回来
+    #[test]
+    fn data_images_become_inline_parts() {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        let html = format!(
+            "<p>你好 &lt;img src=x&gt;</p><img alt=\"a>b\" src=\"data:image/png;base64,{png}\" width=\"80\"><img src=\"https://e.com/x.png\"><img src=\"data:image/png;base64,{png}\"><img src=\"data:image/svg+xml;base64,AAAA\"><img src=\"data:image/png;base64,***\"><IMG SRC=\"DATA:IMAGE/PNG;BASE64,{png}\">"
+        );
+        let (out, images) = embed_data_images(&html, "kojoo.co");
+        assert_eq!(images.len(), 1, "{out}");
+        let cid = &images[0].1;
+        // 三处都换了：两处一样的，加一处标签和前缀都大写的（同一张图，还是只带一份）
+        assert_eq!(out.matches(&format!("=\"cid:{cid}\"")).count(), 3, "{out}");
+        assert!(!out.contains("DATA:IMAGE"), "大写的没认出来：{out}");
+        assert!(out.contains("alt=\"a>b\"") && out.contains("width=\"80\"") && out.contains("https://e.com/x.png"), "{out}");
+        assert!(out.contains("data:image/svg+xml") && out.contains("base64,***"), "{out}");
+        assert_eq!(images[0].0, "image/png");
+        assert_eq!(&images[0].2[..4], b"\x89PNG");
+        // 没有图片的不动
+        assert_eq!(embed_data_images("<p>a</p>", "x").0, "<p>a</p>");
+
+        let a = |e: &str| Addr { name: String::new(), email: e.into() };
+        let mut o = Outgoing {
+            from: a("me@kojoo.co"),
+            to: vec![a("to@example.com")],
+            cc: vec![],
+            bcc: vec![],
+            subject: "s".into(),
+            text: "纯文字".into(),
+            html,
+            in_reply_to: "<orig@example.com>".into(),
+            references: "<first@example.com> <orig@example.com>".into(),
+            attachments: vec![],
+        };
+        let raw = build(&o, "kojoo.co", false).unwrap();
+        // 回复带的会话头还在（对方靠它把这封归到原来那串邮件里）
+        let head = String::from_utf8_lossy(&raw).to_string();
+        assert!(head.contains("In-Reply-To: <orig@example.com>") && head.contains("References: <first@example.com>"), "{head}");
+        let full = crate::mime::parse_full(&raw);
+        assert!(full.html.contains("cid:img1."), "{}", full.html);
+        assert_eq!(full.text.trim(), "纯文字");
+        assert_eq!(full.atts.iter().filter(|x| x.inline).count(), 1);
+        assert_eq!(full.atts.iter().filter(|x| !x.inline).count(), 0);
+        let s = String::from_utf8_lossy(&raw).to_string();
+        assert!(s.contains("multipart/related") && s.contains("multipart/alternative") && !s.contains("multipart/mixed"), "{s}");
+        // 再带一个附件：附件在最外层，图片还是跟着正文
+        o.attachments.push(OutAttachment { name: "a.txt".into(), mime: "text/plain".into(), data: b"hi".to_vec() });
+        let raw = build(&o, "kojoo.co", false).unwrap();
+        let full = crate::mime::parse_full(&raw);
+        assert_eq!(full.atts.iter().filter(|x| x.inline).count(), 1);
+        assert_eq!(full.atts.iter().filter(|x| !x.inline).map(|x| x.name.clone()).collect::<Vec<_>>(), vec!["a.txt".to_string()]);
+        assert!(String::from_utf8_lossy(&raw).contains("multipart/mixed"));
+    }
 
     /// SMTP 版不带 Bcc 头（密送人只走信封）；Graph 版要带，Graph 靠它投递给密送人
     #[test]

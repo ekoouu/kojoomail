@@ -1,7 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Icon } from './icons'
+import { api, errText } from './lib/api'
 import { avatarColors, initials } from './lib/format'
+import { mdPreview } from './lib/md'
 import { useApp } from './store'
 import { L } from './lib/i18n'
 
@@ -87,6 +89,23 @@ export function Seg<T extends string>({ value, options, onChange, small }: { val
         <button key={k} role="tab" aria-selected={value === k} className={value === k ? 'on' : ''} onClick={() => onChange(k)}>{label}</button>
       ))}
     </div>
+  )
+}
+
+/** 排好版的 Markdown（或者已经排好并清洗过的 html）：写信的预览、签名的预览共用。点链接交给系统浏览器，不让应用窗口自己跳到那个网页 */
+export function MdView({ md, html: ready, className }: { md?: string; html?: string; className: string }) {
+  const html = useMemo(() => ready ?? mdPreview(md || ''), [md, ready])
+  return (
+    <div className={className} dangerouslySetInnerHTML={{ __html: html || `<p style="color:var(--ter)">${L('（空）', '(empty)')}</p>` }} onClick={(e) => {
+      const a = (e.target as Element).closest('a')
+      if (!a) return
+      e.preventDefault()
+      const href = (a.getAttribute('href') || '').trim()
+      const say = useApp.getState().toast
+      if (/^https?:/i.test(href)) api.openUrl(href).catch((err) => say(L(`链接打不开：${errText(err)}`, `Couldn't open the link: ${errText(err)}`), { kind: 'err' }))
+      // 邮件地址、电话这类：这里是预览（多半正写着信），不替用户另开写信窗口，但要说一声，不能点了没动静
+      else if (href) say(L(`预览里不打开这类链接：${href.slice(0, 80)}`, `This kind of link isn't opened from the preview: ${href.slice(0, 80)}`))
+    }} />
   )
 }
 

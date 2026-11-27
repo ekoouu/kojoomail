@@ -17,7 +17,7 @@ export type Account = {
 
 /** 可以选作常用分类的 AI 类别（「其他」不当页签） */
 export const FOCUS_CATS = ['询盘', '待办', '账单', '通知', '订阅', '个人'] as const
-export type Folder = { id: number; accountId: number; path: string; name: string; role: string; unread: number; total: number }
+export type Folder = { id: number; accountId: number; path: string; name: string; role: string; unread: number; total: number; delim: string }
 export type Status = {
   accountId: number; state: 'connecting' | 'syncing' | 'idle' | 'error' | 'offline' | ''; error: string; errorKind: '' | 'auth' | 'network' | 'store'
   lastOk: number; fails: number; progressDone: number; progressTotal: number; log: string[]
@@ -64,7 +64,7 @@ export type Todo = {
 }
 export type Att = { idx: number; name: string; size: number; mime: string; inline: boolean }
 export type MsgFull = MsgLite & { cc: Addr[]; replyTo: string; msgid: string; refs: string; inReplyTo: string; text: string; html: string; atts: Att[]; ai: AiResult | null; aiPending: boolean; todos: Todo[]; code: string }
-export type Draft = { id: number; accountId: number | null; to: Addr[]; cc: Addr[]; bcc: Addr[]; subject: string; body: string; replyMsg: number | null; mode: string; updated: number; attachments: string[] }
+export type Draft = { id: number; accountId: number | null; to: Addr[]; cc: Addr[]; bcc: Addr[]; subject: string; body: string; replyMsg: number | null; mode: string; updated: number; attachments: string[]; quote: string; sig: number }
 export type ListQuery = { view: 'all' | 'important' | 'later' | 'bills' | 'followup' | 'sent' | 'folder'; accountId?: number | null; folderId?: number | null; filter?: string; search?: string; maxId?: number | null; threads?: boolean; offset: number; limit: number }
 export type DigestItem = { id: number; accountId: number; who: string; subject: string; summary: string; date: number; seen: boolean; high: boolean }
 export type DigestTodo = { id: number; msgId: number | null; text: string; due: number | null }
@@ -77,7 +77,7 @@ export type AccountIn = {
   imapHost: string; imapPort: number; smtpHost: string; smtpPort: number; smtpTls: boolean; saveSent: boolean
   oauthTicket?: string
 }
-export type DraftIn = { id?: number | null; accountId: number; to: Addr[]; cc: Addr[]; bcc: Addr[]; subject: string; body: string; html: string; replyMsg?: number | null; mode: string; attachments: string[] }
+export type DraftIn = { id?: number | null; accountId: number; to: Addr[]; cc: Addr[]; bcc: Addr[]; subject: string; body: string; html: string; replyMsg?: number | null; mode: string; attachments: string[]; /** 引用 / 转发的原邮件，草稿里和正文分开存 */ quote?: string; /** 1 带签名 / 2 这封不带 / 0 老草稿（签名还在正文里） */ sig?: number }
 export type RuleCond = { field: 'from' | 'to' | 'subject' | 'attachment'; op: 'contains' | 'not_contains' | 'equals' | 'has' | 'none'; value: string }
 export type RuleAction = { kind: 'move' | 'archive' | 'junk' | 'read' | 'unread' | 'flag' | 'unflag'; folder: string }
 export type Rule = { id: number; name: string; enabled: boolean; accountId: number | null; matchAll: boolean; conds: RuleCond[]; actions: RuleAction[]; stop: boolean }
@@ -107,6 +107,9 @@ export const api = {
   move: (ids: number[], target: string) => call<number>('move_to', { ids, target }),
   undoMove: (token: number) => call<boolean>('undo_move', { token }),
   deleteForever: (ids: number[]) => call<void>('delete_forever', { ids }),
+  createFolder: (accountId: number, name: string, parentFolderId: number | null = null) => call<void>('create_folder', { accountId, name, parentFolderId }),
+  renameFolder: (folderId: number, name: string) => call<void>('rename_folder', { folderId, name }),
+  deleteFolder: (folderId: number) => call<void>('delete_folder', { folderId }),
   openFolder: (folderId: number) => call<void>('open_folder', { folderId }),
   syncNow: () => call<void>('sync_now'),
   rules: () => call<Rule[]>('rule_list'),

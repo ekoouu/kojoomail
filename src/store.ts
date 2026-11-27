@@ -94,6 +94,7 @@ type S = {
   /** 会话里点另一封：把它设为当前邮件（回复、删除等操作针对它） */
   focusMsg: (id: number) => Promise<void>
   toggleCheck: (id: number) => void
+  selectAllView: () => Promise<void>
   mark: (ids: number[], p: { seen?: boolean; flagged?: boolean }) => Promise<void>
   /** 一键已读：当前列表（视图、账号、页签、搜索）里的未读全部标为已读，可撤销 */
   markAllRead: () => Promise<void>
@@ -120,7 +121,7 @@ type S = {
 
 const NO_THREAD = { thread: [] as MsgLite[], expanded: {} as Record<number, MsgFull>, threadKey: null as string | null }
 /** 现在的列表是不是按会话显示（搜索结果和重点、稍后处理等视图仍按单封） */
-const threadsOn = (s: Pick<S, 'settings' | 'view' | 'search'>) => !!s.settings?.conversationView && !s.search && (s.view.kind === 'all' || s.view.kind === 'folder' || s.view.kind === 'sent')
+export const threadsOn = (s: Pick<S, 'settings' | 'view' | 'search'>) => !!s.settings?.conversationView && !s.search && (s.view.kind === 'all' || s.view.kind === 'folder' || s.view.kind === 'sent')
 export const rowKey = (m: MsgLite) => (m.thread ? `${m.accountId}:${m.thread.id}` : null)
 /** 当前邮件在列表里是第几行（按会话显示时，当前邮件可能是那一行会话里较早的一封） */
 export const curRow = (s: Pick<S, 'items' | 'selected' | 'threadKey'>) => s.items.findIndex((m) => m.id === s.selected || (!!s.threadKey && rowKey(m) === s.threadKey))
@@ -400,6 +401,19 @@ export const useApp = create<S>((set, get) => ({
     set({ checked: c })
   },
 
+  selectAllView: async () => {
+    const s = get()
+    try {
+      const ids = await api.viewIds({ ...queryFor(s, 0, 1), maxId: null })
+      // 等的时候切到别的文件夹 / 页签 / 搜索了，或者用户自己又改了勾选：这批结果不用
+      const now = get()
+      if (now.view !== s.view || now.filter !== s.filter || now.search !== s.search || now.page !== 'mail' || now.checked !== s.checked) return
+      set({ checked: new Set(ids) })
+      if (!ids.length) get().toast(L('当前视图没有可选择的邮件', 'There are no selectable emails in this view'))
+      else if (ids.length >= 5000 && s.total > ids.length) get().toast(L(`已选择前 ${ids.length} 封（当前视图共 ${s.total} 封）`, `Selected the first ${ids.length} of ${s.total} emails in this view`), { ttl: 6000 })
+    } catch (e) { get().toast(errText(e), { kind: 'err' }) }
+  },
+
   markAllRead: () => bulkRead({}, L('这里没有未读邮件', 'No unread emails here'), (n) => L(`已把 ${n} 封标为已读`, `Marked ${n} as read`), (n) => L(`把这里的 ${n} 封未读邮件都标为已读？`, `Mark all ${n} unread emails here as read?`)),
   tidy: () => bulkRead({ filter: 'bulk', search: '' }, L('通知和订阅都已经读过了', 'All notifications and newsletters are already read'), (n) => L(`已把 ${n} 封通知和订阅标为已读`, `Marked ${n} notifications and newsletters as read`), (n) => L(`把 ${n} 封没读的通知和订阅都标为已读？`, `Mark ${n} unread notifications and newsletters as read?`)),
   loadCats: async () => {
@@ -438,17 +452,20 @@ export const useApp = create<S>((set, get) => ({
 
   move: async (ids, target, label) => {
     const s = get()
-    const picked = s.items.filter((m) => ids.includes(m.id))
-    if (target === 'trash' && picked.length && picked.every((m) => m.role === 'trash')) {
-      if (await ask(L(`彻底删除这 ${picked.length} 封邮件？删除后不能恢复。`, `Permanently delete ${picked.length === 1 ? 'this email' : `these ${picked.length} emails`}? This can't be undone.`))) await get().removeForever(ids)
+    const idSet = new Set(ids)
+    const picked = s.items.filter((m) => idSet.has(m.id))
+    const view = s.view
+    const inTrash = view.kind === 'folder' && !s.search && s.folders.find((f) => f.id === view.folderId)?.role === 'trash'
+    if (target === 'trash' && ids.length > 0 && picked.every((m) => m.role === 'trash') && (picked.length === ids.length || inTrash)) {
+      if (await ask(L(`彻底删除这 ${ids.length} 封邮件？删除后不能恢复。`, `Permanently delete ${ids.length === 1 ? 'this email' : `these ${ids.length} emails`}? This can't be undone.`))) await get().removeForever(ids)
       return
     }
     const idx = s.selected ? curRow(s) : -1
-    const rest = s.items.filter((m) => !ids.includes(m.id))
+    const rest = s.items.filter((m) => !idSet.has(m.id))
     let next: number | null = s.selected
-    if (s.selected && ids.includes(s.selected)) {
+    if (s.selected && idSet.has(s.selected)) {
       // 按会话显示：这一串里还有别的邮件就留在这一串，看剩下的最新一封
-      const remain = s.thread.filter((x) => !ids.includes(x.id))
+      const remain = s.thread.filter((x) => !idSet.has(x.id))
       next = remain.length ? remain[remain.length - 1].id : rest[Math.min(idx, rest.length - 1)]?.id ?? null
     }
     set({ items: rest, total: Math.max(0, s.total - picked.length), checked: new Set() })
@@ -475,8 +492,9 @@ export const useApp = create<S>((set, get) => ({
   },
 
   removeForever: async (ids) => {
-    set({ items: get().items.filter((m) => !ids.includes(m.id)), checked: new Set() })
-    if (get().selected && ids.includes(get().selected!)) set({ selected: null, open: null, ...NO_THREAD })
+    const gone = new Set(ids)
+    set({ items: get().items.filter((m) => !gone.has(m.id)), checked: new Set() })
+    if (get().selected && gone.has(get().selected!)) set({ selected: null, open: null, ...NO_THREAD })
     try {
       await api.deleteForever(ids)
       await get().loadList(true)
@@ -491,7 +509,8 @@ export const useApp = create<S>((set, get) => ({
   later: async (ids, until) => {
     await api.snooze(ids, until)
     if (until) {
-      set({ items: get().items.filter((m) => !ids.includes(m.id) || get().view.kind === 'later') })
+      const gone = new Set(ids)
+      set({ items: get().items.filter((m) => !gone.has(m.id) || get().view.kind === 'later'), checked: new Set() })
       if (get().selected && ids.includes(get().selected!) && get().view.kind !== 'later') set({ selected: null, open: null, ...NO_THREAD })
       get().toast(L('已放到「稍后处理」', 'Snoozed'))
     }

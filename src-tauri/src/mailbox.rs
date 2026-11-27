@@ -39,6 +39,9 @@ pub enum Op {
     Delete { path: String, uids: Vec<u32> },
     /// 清空整个文件夹（只用于「已删除」「垃圾邮件」），包括本地没同步下来的旧邮件
     Empty { path: String },
+    FolderCreate { parent: Option<String>, name: String, reply: oneshot::Sender<Result<(), String>> },
+    FolderRename { path: String, name: String, reply: oneshot::Sender<Result<(), String>> },
+    FolderDelete { path: String, reply: oneshot::Sender<Result<(), String>> },
     Append { role: &'static str, raw: Vec<u8> },
     SyncFolder { folder_id: i64 },
     SyncAll,
@@ -53,6 +56,7 @@ impl Op {
             Op::Move { from, uids, to, ids } => Op::Move { from: from.clone(), uids: uids.clone(), to: to.clone(), ids: ids.clone() },
             Op::Delete { path, uids } => Op::Delete { path: path.clone(), uids: uids.clone() },
             Op::Empty { path } => Op::Empty { path: path.clone() },
+            Op::FolderCreate { .. } | Op::FolderRename { .. } | Op::FolderDelete { .. } => return None,
             Op::Append { role, raw } => Op::Append { role, raw: raw.clone() },
             Op::SyncFolder { folder_id } => Op::SyncFolder { folder_id: *folder_id },
             Op::SyncAll => Op::SyncAll,
@@ -110,11 +114,31 @@ fn give_up(ctx: &Ctx, account_id: i64, op: Op) {
     }
 }
 
+/// p 是不是 base 这个文件夹本身，或者在它下面。delim 是服务器的层级分隔符，还不知道（空）时只认本身
+pub fn path_under(p: &str, base: &str, delim: &str) -> bool {
+    p == base || (!delim.is_empty() && p.strip_prefix(base).is_some_and(|rest| rest.starts_with(delim)))
+}
+
+/// 按名字认系统文件夹（服务器没标用途时用）
+pub fn role_of_leaf(leaf: &str) -> &'static str {
+    match leaf.to_lowercase().as_str() {
+        "sent" | "sent messages" | "sent items" | "sent mail" | "已发送" | "已发送邮件" => "sent",
+        "drafts" | "draft" | "草稿" | "草稿箱" => "drafts",
+        "trash" | "deleted" | "deleted messages" | "deleted items" | "已删除" | "已删除邮件" => "trash",
+        "junk" | "spam" | "junk e-mail" | "junk email" | "垃圾邮件" | "垃圾箱" => "junk",
+        "archive" | "archives" | "归档" => "archive",
+        _ => "",
+    }
+}
+
 /// 连不上的时候：取正文的请求马上回失败，其余操作攒着等连上再做
 fn park_ops(rx: &mut mpsc::UnboundedReceiver<Op>, backlog: &mut Backlog, why: &str) {
     while let Ok(op) = rx.try_recv() {
         match op {
             Op::Body { reply, .. } => {
+                let _ = reply.send(Err(why.to_string()));
+            }
+            Op::FolderCreate { reply, .. } | Op::FolderRename { reply, .. } | Op::FolderDelete { reply, .. } => {
                 let _ = reply.send(Err(why.to_string()));
             }
             op => {
@@ -656,14 +680,7 @@ impl SessionWorker {
                 ""
             };
             if role.is_empty() {
-                role = match leaf.to_lowercase().as_str() {
-                    "sent" | "sent messages" | "sent items" | "sent mail" | "已发送" | "已发送邮件" => "sent",
-                    "drafts" | "draft" | "草稿" | "草稿箱" => "drafts",
-                    "trash" | "deleted" | "deleted messages" | "deleted items" | "已删除" | "已删除邮件" => "trash",
-                    "junk" | "spam" | "junk e-mail" | "junk email" | "垃圾邮件" | "垃圾箱" => "junk",
-                    "archive" | "archives" | "归档" => "archive",
-                    _ => "",
-                };
+                role = role_of_leaf(&leaf);
             }
             if gmail && lower.contains("[gmail]/important") {
                 continue; // Gmail 的「重要」是视图，不同步
@@ -671,7 +688,7 @@ impl SessionWorker {
             if !role.is_empty() && !seen_roles.insert(role) {
                 role = ""; // 同一角色只认第一个
             }
-            rows.push((path, leaf, role.to_string()));
+            rows.push((path, leaf, role.to_string(), delim.to_string()));
         }
         let st = self.ctx.store.lock().unwrap();
         let existing: Vec<(i64, String)> = {
@@ -696,11 +713,11 @@ impl SessionWorker {
                 st.conn.execute("DELETE FROM folders WHERE id=?", [fid])?;
             }
         }
-        for (path, name, role) in rows {
+        for (path, name, role, delim) in rows {
             st.conn.execute(
-                "INSERT INTO folders(account_id, path, name, role) VALUES(?,?,?,?)
-                 ON CONFLICT(account_id, path) DO UPDATE SET name=excluded.name, role=excluded.role",
-                params![self.cfg.id, path, name, role],
+                "INSERT INTO folders(account_id, path, name, role, delim) VALUES(?,?,?,?,?)
+                 ON CONFLICT(account_id, path) DO UPDATE SET name=excluded.name, role=excluded.role, delim=excluded.delim",
+                params![self.cfg.id, path, name, role, delim],
             )?;
         }
         drop(st);
@@ -973,6 +990,155 @@ impl SessionWorker {
         Ok(())
     }
 
+    /// 文件夹操作在服务器上办成之后刷新本机的文件夹清单。刷新失败不算操作没办成（不然界面说「失败」，服务器上其实已经改了）：
+    /// 记一笔，下一次同步会再对
+    async fn refresh_folders_after(&mut self, what: &str) {
+        if let Err(e) = self.sync_folder_list().await {
+            log_line(&self.ctx, self.cfg.id, tr!("{what}已经办成，刷新文件夹清单没成功，稍后会再同步：{e}", "{what} went through, but refreshing the folder list failed; it will sync again later: {e}"));
+        }
+    }
+
+    async fn hierarchy_delimiter(&mut self) -> Result<String> {
+        let names: Vec<async_imap::types::Name> = self.sess().list(Some(""), Some("%")).await?.try_collect().await?;
+        Ok(names.iter().find_map(|n| n.delimiter()).unwrap_or("/").to_string())
+    }
+
+    fn folder_leaf(path: &str, delimiter: &str) -> String {
+        let decoded = text::decode_mutf7(path);
+        decoded.rsplit(delimiter).next().unwrap_or(&decoded).to_string()
+    }
+
+    fn checked_folder_name(name: &str, delimiter: &str) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("{}", crate::i18n::t("文件夹名称不能为空", "Folder name can't be empty")));
+        }
+        if name.chars().any(|c| c.is_control()) || name.contains(delimiter) {
+            return Err(anyhow!(tr!("文件夹名称不能包含「{delimiter}」", "Folder names can't contain \"{delimiter}\"")));
+        }
+        // % 和 * 是服务器列文件夹时的通配符，放进名字里有的服务器会列不出来
+        if name.contains('%') || name.contains('*') {
+            return Err(anyhow!("{}", crate::i18n::t("文件夹名称不能包含 % 和 *", "Folder names can't contain % or *")));
+        }
+        if name.chars().count() > 60 {
+            return Err(anyhow!("{}", crate::i18n::t("文件夹名称太长了（最多 60 个字）", "That folder name is too long (60 characters at most)")));
+        }
+        // 「已发送」「草稿」「归档」这类名字，同步文件夹清单时会被认成系统文件夹：可能顶掉真的那个，之后发出的信、删掉的信都进它，而且在这里再也改不了名、删不掉
+        if !role_of_leaf(name).is_empty() || name.eq_ignore_ascii_case("inbox") {
+            return Err(anyhow!(tr!("「{name}」是系统文件夹用的名字，换一个", "\"{name}\" is a name used by system folders. Pick another one.")));
+        }
+        Ok(name.to_string())
+    }
+
+    /// 这个路径上已经有文件夹就报错（不分大小写：多数服务器不让只差大小写的两个并存）
+    fn no_such_folder(&self, path: &str, name: &str) -> Result<()> {
+        let n: i64 = self.ctx.store.lock().unwrap().conn.query_row(
+            "SELECT COUNT(*) FROM folders WHERE account_id=? AND lower(path)=lower(?)",
+            params![self.cfg.id, path],
+            |r| r.get(0),
+        )?;
+        if n > 0 {
+            return Err(anyhow!(tr!("已经有一个叫「{name}」的文件夹了", "There's already a folder named \"{name}\"")));
+        }
+        Ok(())
+    }
+
+    async fn create_folder(&mut self, parent: Option<String>, name: String) -> Result<()> {
+        let delimiter = self.hierarchy_delimiter().await?;
+        let name = Self::checked_folder_name(&name, &delimiter)?;
+        let encoded = text::encode_mutf7(&name);
+        let path = parent.map(|p| format!("{p}{delimiter}{encoded}")).unwrap_or(encoded);
+        self.no_such_folder(&path, &name)?;
+        self.sess().create(&path).await.map_err(|e| anyhow!(tr!("创建文件夹「{name}」失败：{e}", "Couldn't create folder \"{name}\": {e}")))?;
+        self.refresh_folders_after(crate::i18n::t("新建文件夹", "Creating the folder")).await;
+        Ok(())
+    }
+
+    async fn rename_folder(&mut self, path: String, name: String) -> Result<()> {
+        let delimiter = self.hierarchy_delimiter().await?;
+        let name = Self::checked_folder_name(&name, &delimiter)?;
+        let encoded = text::encode_mutf7(&name);
+        let parent = path.rsplit_once(&delimiter).map(|(p, _)| p);
+        let new_path = parent.map(|p| format!("{p}{delimiter}{encoded}")).unwrap_or(encoded);
+        if new_path == path {
+            return Ok(());
+        }
+        if new_path.to_lowercase() != path.to_lowercase() {
+            self.no_such_folder(&new_path, &name)?;
+        }
+        let old_prefix = format!("{path}{delimiter}");
+        if self.selected == path || self.selected.starts_with(&old_prefix) {
+            let _ = self.select("INBOX").await;
+        }
+        self.sess().rename(&path, &new_path).await.map_err(|e| anyhow!(tr!("重命名文件夹失败：{e}", "Couldn't rename folder: {e}")))?;
+        let new_prefix = format!("{new_path}{delimiter}");
+        {
+            let st = self.ctx.store.lock().unwrap();
+            let rows: Vec<(i64, String)> = {
+                let mut q = st.conn.prepare("SELECT id, path FROM folders WHERE account_id=?")?;
+                let v = q.query_map([self.cfg.id], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(|x| x.ok()).collect();
+                v
+            };
+            let tx = st.conn.unchecked_transaction()?;
+            for (id, old) in rows {
+                let next = if old == path {
+                    Some(new_path.clone())
+                } else {
+                    old.strip_prefix(&old_prefix).map(|suffix| format!("{new_prefix}{suffix}"))
+                };
+                if let Some(next) = next {
+                    let leaf = Self::folder_leaf(&next, &delimiter);
+                    tx.execute("UPDATE folders SET path=?, name=? WHERE id=?", params![next, leaf, id])?;
+                }
+            }
+            // 邮件规则里「移动到」记的是路径：跟着改，不然规则会指向一个不存在的文件夹
+            let rules: Vec<(i64, String)> = {
+                let mut q = tx.prepare("SELECT id, actions_json FROM rules WHERE account_id=?")?;
+                let v = q.query_map([self.cfg.id], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(|x| x.ok()).collect();
+                v
+            };
+            for (rid, json) in rules {
+                let Ok(mut acts) = serde_json::from_str::<Vec<crate::rules::Action>>(&json) else { continue };
+                let mut changed = false;
+                for a in acts.iter_mut().filter(|a| a.kind == "move") {
+                    let next = if a.folder == path { Some(new_path.clone()) } else { a.folder.strip_prefix(&old_prefix).map(|suffix| format!("{new_prefix}{suffix}")) };
+                    if let Some(next) = next {
+                        a.folder = next;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    tx.execute("UPDATE rules SET actions_json=? WHERE id=?", params![serde_json::to_string(&acts)?, rid])?;
+                }
+            }
+            tx.commit()?;
+        }
+        self.selected.clear();
+        self.refresh_folders_after(crate::i18n::t("重命名文件夹", "Renaming the folder")).await;
+        Ok(())
+    }
+
+    async fn delete_folder(&mut self, path: String) -> Result<()> {
+        let delimiter = self.hierarchy_delimiter().await?;
+        let prefix = format!("{path}{delimiter}");
+        // 带着子文件夹删，各家服务器做法不一样（有的拒绝，有的只删这一层留下子文件夹）：让用户先删里面的
+        let kids: i64 = self.ctx.store.lock().unwrap().conn.query_row(
+            "SELECT COUNT(*) FROM folders WHERE account_id=?1 AND substr(path, 1, length(?2))=?2",
+            params![self.cfg.id, prefix],
+            |r| r.get(0),
+        )?;
+        if kids > 0 {
+            return Err(anyhow!("{}", crate::i18n::t("这个文件夹里还有子文件夹，先删掉里面的子文件夹", "This folder has subfolders. Delete them first.")));
+        }
+        if self.selected == path || self.selected.starts_with(&prefix) {
+            let _ = self.select("INBOX").await;
+        }
+        self.sess().delete(&path).await.map_err(|e| anyhow!(tr!("删除文件夹失败：{e}", "Couldn't delete folder: {e}")))?;
+        self.selected.clear();
+        self.refresh_folders_after(crate::i18n::t("删除文件夹", "Deleting the folder")).await;
+        Ok(())
+    }
+
     async fn do_op(&mut self, op: Op) -> Result<()> {
         match op {
             op @ (Op::Body { .. } | Op::Flags { .. }) => self.do_light(op).await?,
@@ -980,10 +1146,16 @@ impl SessionWorker {
                 if uids.is_empty() {
                     return Ok(());
                 }
-                let exists = {
+                let mut exists = {
                     let names: Vec<async_imap::types::Name> = self.sess().list(Some(""), Some(&to)).await?.try_collect().await?;
                     !names.is_empty()
                 };
+                if !exists {
+                    // 有的服务器（实测 Stalwart）按名字单查中文文件夹查不到，其实是有的：再对一遍完整清单，
+                    // 不然会去建一个已经存在的文件夹，服务器的报错又带中文、解析不了，被当成断线反复重连
+                    let all: Vec<async_imap::types::Name> = self.sess().list(Some(""), Some("*")).await?.try_collect().await?;
+                    exists = all.iter().any(|n| n.name() == to);
+                }
                 if !exists {
                     // 没有归档文件夹的邮箱（如 Stalwart 默认）：先建再移
                     self.sess().create(&to).await.map_err(|e| anyhow!(tr!("创建文件夹「{to}」失败：{e}", "Couldn't create folder \"{to}\": {e}")))?;
@@ -1030,6 +1202,30 @@ impl SessionWorker {
                     let _: Vec<_> = self.sess().uid_store(&set, "+FLAGS.SILENT (\\Deleted)").await?.try_collect().await?;
                     self.expunge(&set, &uids).await?;
                 }
+            }
+            Op::FolderCreate { parent, name, reply } => {
+                // 界面那头等超时、已经告诉用户「没办成」了：就真的不办，免得过几分钟文件夹自己没了
+                if reply.is_closed() {
+                    return Ok(());
+                }
+                let r = self.create_folder(parent, name).await.map_err(|e| e.to_string());
+                let _ = reply.send(r);
+            }
+            Op::FolderRename { path, name, reply } => {
+                // 界面那头等超时、已经告诉用户「没办成」了：就真的不办，免得过几分钟文件夹自己没了
+                if reply.is_closed() {
+                    return Ok(());
+                }
+                let r = self.rename_folder(path, name).await.map_err(|e| e.to_string());
+                let _ = reply.send(r);
+            }
+            Op::FolderDelete { path, reply } => {
+                // 界面那头等超时、已经告诉用户「没办成」了：就真的不办，免得过几分钟文件夹自己没了
+                if reply.is_closed() {
+                    return Ok(());
+                }
+                let r = self.delete_folder(path).await.map_err(|e| e.to_string());
+                let _ = reply.send(r);
             }
             Op::Empty { path } => {
                 if self.select(&path).await?.exists > 0 {

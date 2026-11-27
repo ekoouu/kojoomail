@@ -60,6 +60,8 @@ pub struct FolderOut {
     role: String,
     unread: i64,
     total: i64,
+    /// 服务器的层级分隔符（老数据同步前是空的）
+    delim: String,
 }
 
 #[derive(Serialize)]
@@ -228,12 +230,12 @@ fn folders(ctx: &Ctx) -> Res<Vec<FolderOut>> {
     let mut q = st
         .conn
         .prepare(
-            "SELECT id, account_id, path, name, role, unread, total FROM folders
+            "SELECT id, account_id, path, name, role, unread, total, delim FROM folders
              ORDER BY account_id, CASE role WHEN 'inbox' THEN 0 WHEN 'drafts' THEN 1 WHEN 'sent' THEN 2 WHEN 'archive' THEN 3 WHEN 'junk' THEN 4 WHEN 'trash' THEN 5 WHEN '' THEN 7 ELSE 6 END, name",
         )
         .map_err(e)?;
     let v = q
-        .query_map([], |r| Ok(FolderOut { id: r.get(0)?, account_id: r.get(1)?, path: r.get(2)?, name: r.get(3)?, role: r.get(4)?, unread: r.get(5)?, total: r.get(6)? }))
+        .query_map([], |r| Ok(FolderOut { id: r.get(0)?, account_id: r.get(1)?, path: r.get(2)?, name: r.get(3)?, role: r.get(4)?, unread: r.get(5)?, total: r.get(6)?, delim: r.get(7)? }))
         .map_err(e)?
         .filter_map(|x| x.ok())
         .collect();
@@ -806,10 +808,10 @@ fn mark_inner(ctx: &Ctx, ids: &[i64], seen: Option<bool>, flagged: Option<bool>)
 
 #[tauri::command]
 pub async fn snooze(ctx: State<'_, Arc<Ctx>>, ids: Vec<i64>, until: Option<i64>) -> Res<()> {
+    // 一条语句改完（一次能选到几千封）：要么都改，要么都不改
+    let json = serde_json::to_string(&ids).unwrap_or_default();
     let st = ctx.store.lock().unwrap();
-    for id in &ids {
-        st.conn.execute("UPDATE messages SET later_until=? WHERE id=?", params![until, id]).map_err(e)?;
-    }
+    st.conn.execute("UPDATE messages SET later_until=?1 WHERE id IN (SELECT value FROM json_each(?2))", params![until, json]).map_err(e)?;
     drop(st);
     changed(&ctx);
     Ok(())
@@ -919,6 +921,16 @@ pub async fn undo_move(ctx: State<'_, Arc<Ctx>>, token: u64) -> Res<bool> {
 
 #[tauri::command]
 pub async fn delete_forever(ctx: State<'_, Arc<Ctx>>, ids: Vec<i64>) -> Res<()> {
+    // 彻底删除只对「已删除」里的邮件做。界面判断错了（比如在「已删除」里搜索，搜出来的其实是别的文件夹的）也不能把别处的邮件永久删掉
+    {
+        let json = serde_json::to_string(&ids).unwrap_or_default();
+        let outside: i64 = ctx.store.lock().unwrap().conn
+            .query_row("SELECT COUNT(*) FROM messages m JOIN folders f ON f.id=m.folder_id WHERE m.id IN (SELECT value FROM json_each(?)) AND f.role<>'trash'", [json], |r| r.get(0))
+            .map_err(e)?;
+        if outside > 0 {
+            return Err(crate::i18n::t("选中的邮件里有不在「已删除」里的，没有彻底删除任何邮件", "Some of the selected emails aren't in Trash. Nothing was permanently deleted.").into());
+        }
+    }
     let rows = locate(&ctx, &ids);
     {
         let st = ctx.store.lock().unwrap();
@@ -954,6 +966,99 @@ pub async fn empty_folder(ctx: State<'_, Arc<Ctx>>, folder_id: i64) -> Res<u64> 
     worker_send(&ctx, acc, Op::Empty { path });
     changed(&ctx);
     Ok(ids.len() as u64)
+}
+
+/// 这个账号有没有还在路上的移动：撤销窗口里的（moving=1）、本机占位（uid<0：服务器还没办完的）。
+/// 这时候改名或删除文件夹，排着队的移动会找不到原来的路径，邮件可能跟着文件夹一起没了。
+/// 按整个账号看，不只看这一个文件夹：改名会连子文件夹的路径一起改，撤销窗口里的移动要去哪个文件夹这里也查不到
+fn folder_busy(ctx: &Ctx, account_id: i64) -> bool {
+    ctx.store
+        .lock()
+        .unwrap()
+        .conn
+        .query_row("SELECT COUNT(*) FROM messages WHERE account_id=? AND (uid<0 OR moving=1)", [account_id], |r| r.get::<_, i64>(0))
+        .map(|n| n > 0)
+        .unwrap_or(true)
+}
+
+/// 哪条邮件规则会把邮件移到这个文件夹（或它下面的子文件夹）
+fn rule_using_folder(st: &crate::store::Store, account_id: i64, path: &str, delim: &str) -> Option<String> {
+    let mut q = st.conn.prepare("SELECT name, actions_json FROM rules WHERE account_id=?").ok()?;
+    let rows: Vec<(String, String)> = q.query_map([account_id], |r| Ok((r.get(0)?, r.get(1)?))).ok()?.filter_map(|x| x.ok()).collect();
+    rows.into_iter().find_map(|(name, json)| {
+        let acts: Vec<crate::rules::Action> = serde_json::from_str(&json).unwrap_or_default();
+        acts.iter().any(|a| a.kind == "move" && crate::mailbox::path_under(&a.folder, path, delim)).then_some(name)
+    })
+}
+
+async fn folder_op_result(rx: tokio::sync::oneshot::Receiver<Result<(), String>>) -> Res<()> {
+    match tokio::time::timeout(Duration::from_secs(45), rx).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => Err(crate::i18n::t("文件夹操作没有完成", "The folder operation didn't complete").into()),
+        Err(_) => Err(crate::i18n::t("文件夹操作超时，请检查网络后重试", "The folder operation timed out. Check your connection and try again.").into()),
+    }
+}
+
+#[tauri::command]
+pub async fn create_folder(ctx: State<'_, Arc<Ctx>>, account_id: i64, name: String, parent_folder_id: Option<i64>) -> Res<()> {
+    let parent = if let Some(id) = parent_folder_id {
+        let (acc, path): (i64, String) = ctx.store.lock().unwrap().conn
+            .query_row("SELECT account_id, path FROM folders WHERE id=?", [id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(e)?;
+        if acc != account_id {
+            return Err(crate::i18n::t("父文件夹不属于这个账号", "The parent folder belongs to another account").into());
+        }
+        Some(path)
+    } else {
+        None
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let workers = ctx.workers.lock().unwrap();
+        let Some(w) = workers.get(&account_id) else { return Err(crate::i18n::t("这个账号没有在运行", "This account isn't running").into()) };
+        w.send(Op::FolderCreate { parent, name, reply: tx });
+    }
+    folder_op_result(rx).await
+}
+
+#[tauri::command]
+pub async fn rename_folder(ctx: State<'_, Arc<Ctx>>, folder_id: i64, name: String) -> Res<()> {
+    let (acc, path, role): (i64, String, String) = ctx.store.lock().unwrap().conn
+        .query_row("SELECT account_id, path, role FROM folders WHERE id=?", [folder_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(e)?;
+    if !role.is_empty() {
+        return Err(crate::i18n::t("系统文件夹不能重命名", "System folders can't be renamed").into());
+    }
+    if folder_busy(&ctx, acc) {
+        return Err(crate::i18n::t("这个邮箱还有邮件正在移动，等它办完再试", "Some emails in this account are still being moved. Try again in a moment.").into());
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let workers = ctx.workers.lock().unwrap();
+        let Some(w) = workers.get(&acc) else { return Err(crate::i18n::t("这个账号没有在运行", "This account isn't running").into()) };
+        w.send(Op::FolderRename { path, name, reply: tx });
+    }
+    folder_op_result(rx).await
+}
+
+#[tauri::command]
+pub async fn delete_folder(ctx: State<'_, Arc<Ctx>>, folder_id: i64) -> Res<()> {
+    let (acc, path, role, delim): (i64, String, String, String) = ctx.store.lock().unwrap().conn
+        .query_row("SELECT account_id, path, role, delim FROM folders WHERE id=?", [folder_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(e)?;
+    if !role.is_empty() {
+        return Err(crate::i18n::t("系统文件夹不能删除", "System folders can't be deleted").into());
+    }
+    if folder_busy(&ctx, acc) {
+        return Err(crate::i18n::t("这个邮箱还有邮件正在移动，等它办完再试", "Some emails in this account are still being moved. Try again in a moment.").into());
+    }
+    if let Some(rule) = rule_using_folder(&ctx.store.lock().unwrap(), acc, &path, &delim) {
+        return Err(tr!("邮件规则「{rule}」会把邮件移到这个文件夹，先改掉或删掉这条规则", "The rule \"{rule}\" moves mail into this folder. Change or delete that rule first.").into());
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let workers = ctx.workers.lock().unwrap();
+        let Some(w) = workers.get(&acc) else { return Err(crate::i18n::t("这个账号没有在运行", "This account isn't running").into()) };
+        w.send(Op::FolderDelete { path, reply: tx });
+    }
+    folder_op_result(rx).await
 }
 
 #[tauri::command]
@@ -1255,6 +1360,10 @@ pub async fn update_account(ctx: State<'_, Arc<Ctx>>, id: i64, patch: AccountPat
         st.conn.execute("UPDATE accounts SET color=? WHERE id=?", params![v, id]).map_err(e)?;
     }
     if let Some(v) = patch.signature {
+        // 签名里能放图片了：给个总上限。它跟着每封信发出去，也跟着账号信息每次刷新传给界面，不能大（「插入图片」缩过的一张约几十 KB）
+        if v.len() > 400 * 1024 {
+            return Err(crate::i18n::t("签名太大了（图片加起来不能超过约 300 KB），请减少或缩小图片", "The signature is too large (images can add up to about 300 KB). Use fewer or smaller images.").into());
+        }
         st.conn.execute("UPDATE accounts SET signature=? WHERE id=?", params![v, id]).map_err(e)?;
     }
     if let Some(v) = patch.ai_allowed {
@@ -1333,6 +1442,12 @@ pub struct DraftIn {
     reply_msg: Option<i64>,
     mode: String,
     attachments: Vec<String>,
+    /// 引用 / 转发的原邮件那一段。存草稿时和正文分开存；发信时界面已经把它拼进 body 了，这里不用
+    #[serde(default)]
+    quote: String,
+    /// 1 = 带签名 / 2 = 这封不带（0 = 老草稿，见 store.rs 数据版本 8）
+    #[serde(default)]
+    sig: i64,
 }
 
 #[tauri::command]
@@ -1363,6 +1478,8 @@ pub async fn precheck_send(ctx: State<'_, Arc<Ctx>>, d: DraftIn) -> Res<()> {
             total += mime::parse_full(&raw).atts.iter().filter(|a| !a.inline).map(|a| a.size as u64).sum::<u64>();
         }
     }
+    // 签名里的图片也跟着邮件走，一起算
+    total += smtp::embed_data_images(&d.html, "x").1.iter().map(|i| i.2.len() as u64).sum::<u64>();
     if total > 25 * 1024 * 1024 {
         return Err(crate::i18n::t("附件加起来超过 25 MB，多数邮箱会拒收，请分开发或改用下载链接", "Attachments add up to more than 25 MB, which most mail servers reject. Send them separately or share a download link.").into());
     }
@@ -1529,6 +1646,8 @@ pub struct DraftOut {
     mode: String,
     updated: i64,
     attachments: Vec<String>,
+    quote: String,
+    sig: i64,
 }
 
 #[tauri::command]
@@ -1540,16 +1659,16 @@ pub async fn save_draft(ctx: State<'_, Arc<Ctx>>, d: DraftIn) -> Res<i64> {
     if let Some(id) = d.id {
         st.conn
             .execute(
-                "UPDATE drafts SET account_id=?, to_json=?, cc_json=?, bcc_json=?, subject=?, body=?, reply_msg=?, mode=?, updated=?, att_json=? WHERE id=?",
-                params![d.account_id, j(&d.to), j(&d.cc), j(&d.bcc), d.subject, d.body, d.reply_msg, d.mode, now(), att, id],
+                "UPDATE drafts SET account_id=?, to_json=?, cc_json=?, bcc_json=?, subject=?, body=?, reply_msg=?, mode=?, updated=?, att_json=?, quote=?, sig=? WHERE id=?",
+                params![d.account_id, j(&d.to), j(&d.cc), j(&d.bcc), d.subject, d.body, d.reply_msg, d.mode, now(), att, d.quote, d.sig, id],
             )
             .map_err(e)?;
         Ok(id)
     } else {
         st.conn
             .execute(
-                "INSERT INTO drafts(account_id, to_json, cc_json, bcc_json, subject, body, reply_msg, mode, updated, att_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                params![d.account_id, j(&d.to), j(&d.cc), j(&d.bcc), d.subject, d.body, d.reply_msg, d.mode, now(), att],
+                "INSERT INTO drafts(account_id, to_json, cc_json, bcc_json, subject, body, reply_msg, mode, updated, att_json, quote, sig) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![d.account_id, j(&d.to), j(&d.cc), j(&d.bcc), d.subject, d.body, d.reply_msg, d.mode, now(), att, d.quote, d.sig],
             )
             .map_err(e)?;
         Ok(st.conn.last_insert_rowid())
@@ -1559,11 +1678,11 @@ pub async fn save_draft(ctx: State<'_, Arc<Ctx>>, d: DraftIn) -> Res<i64> {
 #[tauri::command]
 pub async fn list_drafts(ctx: State<'_, Arc<Ctx>>) -> Res<Vec<DraftOut>> {
     let st = ctx.store.lock().unwrap();
-    let mut q = st.conn.prepare("SELECT id, account_id, to_json, cc_json, bcc_json, subject, body, reply_msg, mode, updated, att_json FROM drafts ORDER BY updated DESC").map_err(e)?;
+    let mut q = st.conn.prepare("SELECT id, account_id, to_json, cc_json, bcc_json, subject, body, reply_msg, mode, updated, att_json, quote, sig FROM drafts ORDER BY updated DESC").map_err(e)?;
     let v = q
         .query_map([], |r| {
             let p = |s: String| serde_json::from_str::<Vec<Addr>>(&s).unwrap_or_default();
-            Ok(DraftOut { id: r.get(0)?, account_id: r.get(1)?, to: p(r.get(2)?), cc: p(r.get(3)?), bcc: p(r.get(4)?), subject: r.get(5)?, body: r.get(6)?, reply_msg: r.get(7)?, mode: r.get(8)?, updated: r.get(9)?, attachments: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default() })
+            Ok(DraftOut { id: r.get(0)?, account_id: r.get(1)?, to: p(r.get(2)?), cc: p(r.get(3)?), bcc: p(r.get(4)?), subject: r.get(5)?, body: r.get(6)?, reply_msg: r.get(7)?, mode: r.get(8)?, updated: r.get(9)?, attachments: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(), quote: r.get(11)?, sig: r.get(12)? })
         })
         .map_err(e)?
         .filter_map(|x| x.ok())

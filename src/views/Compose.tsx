@@ -6,8 +6,8 @@ import { Icon } from '../icons'
 import { useApp, pendingSends } from '../store'
 import { api, errText, type Addr, type DraftIn } from '../lib/api'
 import { parseAddrs, validEmail, fullTime } from '../lib/format'
-import { mdPreview, mdToHtml, quoteText } from '../lib/md'
-import { Seg, Sheet, useMenu } from '../ui'
+import { mailHtml, previewHtml, quoteText, textWithSig } from '../lib/md'
+import { MdView, Seg, Sheet, useMenu } from '../ui'
 import { keyText } from '../lib/platform'
 import { L, EN } from '../lib/i18n'
 
@@ -41,12 +41,16 @@ export default function Compose() {
     if (c.prefill?.subject != null) subject = c.prefill.subject
     const d = c.draft
     if (d) {
-      // 草稿里存的正文已经带着引用，原样恢复
-      return { accountId: d.accountId || accountId, to: d.to, cc: d.cc, bcc: d.bcc, subject: d.subject, body: d.body, quote: '', files: d.attachments || [], replyMsg: d.replyMsg ?? null, mode: d.mode || 'new' }
+      // 草稿里正文、引用、带不带签名是分开存的，照原样恢复。
+      // sig 为 0 是签名改成单独显示之前存的草稿里，升级时没对上的那些（见 store.rs 数据版本 8）：签名多半还在正文里（回复时夹在正文和引用之间），
+      // 也可能用户改过签名、自己删过。正文正好以现在的签名结尾的拿掉、交给下面那块显示；其余一律当「这封不带」，正文是什么样就什么样，不自动再加一份
+      const sig = me(d.accountId || accountId)?.signature || ''
+      let body = d.body
+      let noSig = d.sig !== 1
+      if (!d.sig && sig && body.endsWith(`\n\n${sig}`)) { body = body.slice(0, -sig.length - 2); noSig = false }
+      return { accountId: d.accountId || accountId, to: d.to, cc: d.cc, bcc: d.bcc, subject: d.subject, body, quote: d.quote || '', noSig, files: d.attachments || [], replyMsg: d.replyMsg ?? null, mode: d.mode || 'new' }
     }
-    const sig = accountId ? me(accountId)?.signature : ''
-    const body = (c.prefill?.body ?? '') + (sig && !c.prefill?.body ? `\n\n${sig}` : '')
-    return { accountId, to, cc, bcc: [] as Addr[], subject, body, quote, files: [] as string[], replyMsg: base?.id ?? null, mode: c.mode === 'draft' ? 'new' : c.mode }
+    return { accountId, to, cc, bcc: [] as Addr[], subject, body: c.prefill?.body ?? '', quote, noSig: false, files: [] as string[], replyMsg: base?.id ?? null, mode: c.mode === 'draft' ? 'new' : c.mode }
   }, [c.key])
 
   const [accountId, setAccountId] = useState<number>(initial.accountId!)
@@ -54,6 +58,7 @@ export default function Compose() {
   const [showCc, setShowCc] = useState(initial.cc.length > 0 || initial.bcc.length > 0)
   const [subject, setSubject] = useState(initial.subject)
   const [body, setBody] = useState(initial.body)
+  const [noSig, setNoSig] = useState(initial.noSig)
   const [showQuote, setShowQuote] = useState(false)
   const [mode, setMode] = useState<'edit' | 'preview'>('edit')
   const [files, setFiles] = useState<string[]>(initial.files)
@@ -68,9 +73,16 @@ export default function Compose() {
   const bodyRef = useRef<HTMLTextAreaElement>(null)
   const menu = useMenu()
 
+  // 签名不进编辑框：正文下面单独排好版显示，发送和预览时才接在正文后面。换发件账号签名跟着换；某一封可以不带
+  const accSig = me(accountId)?.signature || ''
+  const sig = noSig ? '' : accSig
+  const withSig = textWithSig(body, sig, !initial.quote.trim())
+  const preview = useMemo(() => mode === 'preview' ? previewHtml(body, sig) : '', [mode, body, sig])
+
+  // 草稿里正文、引用、带不带签名分开存（不把签名写进正文：之后改了签名、换了账号，打开草稿用的是新的）
   const draft = (): DraftIn => ({
     id: draftId, accountId, to: rc.to, cc: rc.cc, bcc: rc.bcc, subject,
-    body: body + (initial.quote ? initial.quote : ''), html: '', replyMsg: initial.replyMsg, mode: initial.mode, attachments: files,
+    body, quote: initial.quote, sig: noSig ? 2 : 1, html: '', replyMsg: initial.replyMsg, mode: initial.mode, attachments: files,
   })
 
   // 自动存草稿：停止输入 2 秒后
@@ -80,7 +92,7 @@ export default function Compose() {
       try { const id = await api.saveDraft(draft()); setDraftId(id); setSavedAt(Date.now()) } catch { /* 忽略 */ }
     }, 2000)
     return () => clearTimeout(t)
-  }, [rc, subject, body, accountId, files])
+  }, [rc, subject, body, accountId, files, noSig])
   const touch = () => { dirty.current = true }
 
   // 拖文件进窗口 = 添加附件
@@ -133,7 +145,8 @@ export default function Compose() {
     s.refreshMeta()
   }
 
-  const placeholders = (body.match(/\[[^\]\n]{1,30}\]/g) || []).filter((p) => !/^\[[xX ]\]$/.test(p))
+  // 没填的占位：[日期] 这种。Markdown 的链接、图片 [文字](网址) 不算（签名里常有）；链接按钮插的 (https://) 还没填网址，照样提醒
+  const placeholders = (withSig.match(/\[[^\]\n]{1,30}\](?!\((?:https?:\/\/|mailto:|tel:)[^\s)])/gi) || []).filter((p) => !/^\[[xX ]\]$/.test(p))
   const facts = base?.ai?.facts || []
 
   const send = async () => {
@@ -149,16 +162,18 @@ export default function Compose() {
     if (placeholders.length && !await ask(L(`正文里还有 ${placeholders.length} 处没填的占位，比如 ${placeholders[0]}。确定发送吗？`, `The message still has ${placeholders.length} unfilled ${placeholders.length === 1 ? 'placeholder' : 'placeholders'}, such as ${placeholders[0]}. Send anyway?`))) return
     if (!subject.trim() && !await ask(L('没有主题，确定发送吗？', 'No subject. Send anyway?'))) return
     const d = draft()
-    try { await api.precheckSend(d) } catch (e) { s.toast(errText(e), { kind: 'err', ttl: 8000 }); return }
-    d.html = mdToHtml(d.body)
+    // 真正发出去的：纯文字版和排版好的 HTML 都是 正文 + 签名 + 引用的原邮件
+    const out: DraftIn = { ...d, body: withSig + initial.quote, html: mailHtml(body, sig, initial.quote) }
+    try { await api.precheckSend(out) } catch (e) { s.toast(errText(e), { kind: 'err', ttl: 8000 }); return }
     // 先存草稿：发送失败或撤销时内容不会丢
-    try { d.id = await api.saveDraft({ ...d, html: '' }) } catch { /* */ }
+    try { d.id = await api.saveDraft(d) } catch { /* */ }
+    out.id = d.id
     s.set({ compose: null })
     const secs = s.settings?.undoSendSecs ?? 5
     let cancelled = false
     let left = secs
     let lastToast = 0
-    const reopen = () => s.openCompose('draft', null, { draftId: d.id, draft: { ...d, html: '' } })
+    const reopen = () => s.openCompose('draft', null, { draftId: d.id, draft: d })
     const show = () => { if (lastToast) s.drop(lastToast); lastToast = s.toast(L(`正在发送… `, `Sending… `), { action: { label: L(`撤销 ${left}`, `Undo ${left}`), run: () => { cancelled = true; reopen() } }, ttl: 1100 }) }
     if (secs > 0) {
       // 倒计时期间不能重新加载界面（换语言），否则信就停在草稿里发不出去
@@ -177,7 +192,7 @@ export default function Compose() {
     }
     pendingSends.n++
     try {
-      await api.send(d)
+      await api.send(out)
       s.toast(L('已发送', 'Sent'))
       s.refreshMeta()
     } catch (e) {
@@ -226,16 +241,7 @@ export default function Compose() {
         <div className="c-edit" style={{ position: 'relative' }}>
           <div className="c-field">
             <span className="k">{L('发件人', 'From')}</span>
-            <select value={accountId} onChange={(e) => {
-              const next = Number(e.target.value)
-              const oldSig = me(accountId)?.signature || ''
-              const newSig = me(next)?.signature || ''
-              if (oldSig !== newSig) {
-                if (oldSig && body.endsWith(`\n\n${oldSig}`)) setBody(body.slice(0, -oldSig.length - 2) + (newSig ? `\n\n${newSig}` : ''))
-                else if (!oldSig && newSig && !body.includes(newSig)) setBody(`${body}\n\n${newSig}`)
-              }
-              setAccountId(next); touch()
-            }} className="field" style={{ width: 'auto', height: 28, fontSize: 13, padding: '0 8px', maxWidth: '100%' }} aria-label={L('发件账号', 'Sending account')}>
+            <select value={accountId} onChange={(e) => { setAccountId(Number(e.target.value)); touch() }} className="field" style={{ width: 'auto', height: 28, fontSize: 13, padding: '0 8px', maxWidth: '100%' }} aria-label={L('发件账号', 'Sending account')}>
               {s.accounts.map((a) => <option key={a.id} value={a.id}>{(a.label ? `${a.label} · ` : '') + a.email}</option>)}
             </select>
           </div>
@@ -255,9 +261,21 @@ export default function Compose() {
             )}
           </div>
           {mode === 'edit' ? (
-            <textarea ref={bodyRef} value={body} onChange={(e) => { setBody(e.target.value); touch() }} placeholder={L('写点什么…', 'Write something…')} aria-label={L('正文', 'Message body')} spellCheck={false} />
+            <>
+              <textarea ref={bodyRef} value={body} onChange={(e) => { setBody(e.target.value); touch() }} placeholder={L('写点什么…', 'Write something…')} aria-label={L('正文', 'Message body')} spellCheck={false} />
+              {accSig && (noSig ? (
+                <div className="c-sig off">
+                  <div className="head"><span className="k">{L('这封不带签名', 'No signature on this email')}</span><button className="btn link sm" onClick={() => { setNoSig(false); touch() }}>{L('加上签名', 'Add it back')}</button></div>
+                </div>
+              ) : (
+                <div className="c-sig">
+                  <div className="head"><span className="k">{L('签名（发送时自动加在正文后面）', 'Signature (added after your message when sent)')}</span><button className="btn link sm" onClick={() => { setNoSig(true); touch() }}>{L('这封不带', 'Leave it off this email')}</button></div>
+                  <MdView className="sig-preview" md={accSig} />
+                </div>
+              ))}
+            </>
           ) : (
-            <div className="preview" dangerouslySetInnerHTML={{ __html: mdPreview(body) || `<p style="color:var(--ter)">${L('（空）', '(empty)')}</p>` }} />
+            <MdView className="preview" html={preview} />
           )}
           {initial.quote && (
             <div style={{ padding: '0 24px 8px' }}>
